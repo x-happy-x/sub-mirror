@@ -1,0 +1,27 @@
+services:
+  fetcher:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./app:/app
+      - ./data:/data
+    command: ["sh", "-lc", "node server.js"]
+    environment:
+      CONVERTER_URL: "http://converter:25500/sub"
+      SOURCE_URL: "http://web/source.txt"
+      PORT: "8787"
+    depends_on:
+      - converter
+
+  converter:
+    image: tindy2013/subconverter:latest
+    restart: unless-stopped
+
+  web:
+    image: nginx:alpine
+    ports:
+      - "0.0.0.0:25500:80"
+    volumes:
+      - ./data:/usr/share/nginx/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
