@@ -1,27 +1,17 @@
 services:
-  fetcher:
-    image: node:20-alpine
-    working_dir: /app
-    volumes:
-      - ./app:/app
-      - ./data:/data
-    command: ["sh", "-lc", "node server.js"]
-    environment:
-      CONVERTER_URL: "http://converter:25500/sub"
-      SOURCE_URL: "http://web/source.txt"
-      PORT: "8787"
-    depends_on:
-      - converter
-
-  converter:
-    image: tindy2013/subconverter:latest
-    restart: unless-stopped
-
-  web:
-    image: nginx:alpine
+  sub-mirror:
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "0.0.0.0:25500:80"
+      - "0.0.0.0:25500:8788"
+      - "0.0.0.0:25501:8787"
     volumes:
-      - ./data:/usr/share/nginx/html:ro
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-    restart: unless-stopped
+      - ./data:/data
+    environment:
+      SUB_URL: ""
+      USE_CONVERTER: "1"
+      CONVERTER_URL: "http://127.0.0.1:8787/sub"
+      SOURCE_URL: "http://127.0.0.1:8788/source.txt"
+      APP_PORT: "8788"
+      SUBCONVERTER_PORT: "8787"
