@@ -17,6 +17,12 @@ docker compose up --build
 - `8788` — Node.js приложение
 - `8787` — subconverter
 
+## Использование образа из GHCR
+```bash
+docker pull ghcr.io/x-happy-x/sub-mirror:latest
+docker run --rm -p 8788:8788 -p 8787:8787 -v ./data:/data ghcr.io/x-happy-x/sub-mirror:latest
+```
+
 ## Локальный запуск (без Docker)
 Требуется Node.js 18+.
 ```bash

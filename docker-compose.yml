@@ -1,8 +1,6 @@
 services:
   sub-mirror:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/x-happy-x/sub-mirror:latest
     ports:
       - "0.0.0.0:25500:8788"
       - "0.0.0.0:25501:8787"
