@@ -73,6 +73,20 @@ function extractVlessLines(text) {
     .filter((line) => line.startsWith("vless://"));
 }
 
+function hasAnySubscriptions(text) {
+  const t = text.trim();
+  if (!t) return false;
+  if (looksLikeClashProviderYaml(t)) {
+    return /-\s*name\s*:/m.test(t);
+  }
+  const decoded = looksLikeUriListOrBase64(t) ? decodeBase64IfNeeded(t) : t;
+  const prefixes = ["vless://", "vmess://", "ss://", "ssr://", "trojan://"];
+  return decoded
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && prefixes.some((prefix) => line.startsWith(prefix))).length > 0;
+}
+
 function buildYaml(obj, indent = 0) {
   const pad = "  ".repeat(indent);
   if (Array.isArray(obj)) {
@@ -176,6 +190,11 @@ function convertVlessListToClash(text) {
 
 function writeStatus(obj) {
   fs.writeFileSync(OUT_STATUS, JSON.stringify(obj, null, 2));
+}
+
+function logRequest(info) {
+  const entry = { ts: new Date().toISOString(), ...info };
+  console.log(JSON.stringify(entry));
 }
 
 function ensureCacheDir() {
@@ -335,7 +354,58 @@ async function fetchWithNode(subUrl, forwardHeaders) {
   return { body, responseHeaders, responseStatus, responseUrl };
 }
 
+async function refreshCache(reqHeaders, subUrl, useConverter, appName, hwidOverride) {
+  const forwardHeaders =
+    appName === "happ" ? happHeaders(hwidOverride) : sanitizeForwardHeaders(reqHeaders);
+  const fetched = await fetchWithNode(subUrl, forwardHeaders);
+  const raw = fetched.body;
+  if (!raw || raw.trim().length === 0) {
+    return { ok: false, error: "empty response" };
+  }
+  if (isHtml(raw)) {
+    return { ok: false, error: "got HTML (anti-bot page)" };
+  }
+
+  let out = raw;
+  if (!looksLikeClashProviderYaml(raw)) {
+    let convertible = extractConvertibleSource(raw);
+    if (looksLikeUriListOrBase64(convertible)) {
+      convertible = decodeBase64IfNeeded(convertible);
+    }
+
+    if (useConverter) {
+      out = await convertViaSubconverter(convertible);
+      if (!looksLikeClashProviderYaml(out)) {
+        const fallback = convertVlessListToClash(convertible);
+        if (fallback) {
+          out = fallback;
+        }
+      }
+    }
+  }
+
+  const isYaml = looksLikeClashProviderYaml(out);
+  if (!isYaml && useConverter) {
+    return { ok: false, error: "output has no proxies" };
+  }
+
+  if (!hasAnySubscriptions(out)) {
+    return { ok: false, error: "no subscriptions" };
+  }
+
+  const contentType = isYaml ? "text/yaml; charset=utf-8" : "text/plain; charset=utf-8";
+  const upstreamHeaders = sanitizeUpstreamResponseHeaders(fetched.responseHeaders);
+  ensureCacheDir();
+  const cacheKeyValue = cacheKey(subUrl, useConverter, appName);
+  const cachePath = cachePathForKey(cacheKeyValue);
+  fs.writeFileSync(`${cachePath}.tmp`, out);
+  fs.renameSync(`${cachePath}.tmp`, cachePath);
+  writeCacheMeta(cacheKeyValue, { contentType, responseHeaders: upstreamHeaders });
+  return { ok: true, body: out, contentType, responseHeaders: upstreamHeaders };
+}
+
 async function handleSubscription(req, res, appName = "default") {
+  const startedAtMs = Date.now();
   const reqUrl = new URL(req.url || "/", "http://localhost");
   const subUrl = pickSubUrl(reqUrl, req.headers);
   const useConverter = pickUseConverter(reqUrl, req.headers);
@@ -345,6 +415,14 @@ async function handleSubscription(req, res, appName = "default") {
   if (!subUrl) {
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("SUB_URL is required (use ?sub_url= or X-Sub-Url header)");
+    logRequest({
+      route: "/sub",
+      status: 400,
+      app: appName,
+      useConverter,
+      durationMs: Date.now() - startedAtMs,
+      error: "missing sub_url",
+    });
     return;
   }
 
@@ -423,7 +501,10 @@ async function handleSubscription(req, res, appName = "default") {
       const cachePath = cachePathForKey(cacheKeyValue);
       fs.writeFileSync(`${cachePath}.tmp`, out);
       fs.renameSync(`${cachePath}.tmp`, cachePath);
-      writeCacheMeta(cacheKeyValue, { contentType: "text/plain; charset=utf-8" });
+      writeCacheMeta(cacheKeyValue, {
+        contentType: "text/plain; charset=utf-8",
+        responseHeaders: upstreamHeaders,
+      });
 
       writeStatus({
         ok: true,
@@ -449,6 +530,17 @@ async function handleSubscription(req, res, appName = "default") {
         "Access-Control-Allow-Origin": "*",
       });
       res.end(out);
+      logRequest({
+        route: "/sub",
+        status: 200,
+        app: appName,
+        useConverter,
+        contentType: "text/plain; charset=utf-8",
+        responseStatus: fetched.responseStatus,
+        conversion: "none-raw",
+        bytes: out.length,
+        durationMs: Date.now() - startedAtMs,
+      });
       return;
     }
 
@@ -476,7 +568,10 @@ async function handleSubscription(req, res, appName = "default") {
     const cachePath = cachePathForKey(cacheKeyValue);
     fs.writeFileSync(`${cachePath}.tmp`, out);
     fs.renameSync(`${cachePath}.tmp`, cachePath);
-    writeCacheMeta(cacheKeyValue, { contentType: "text/yaml; charset=utf-8" });
+    writeCacheMeta(cacheKeyValue, {
+      contentType: "text/yaml; charset=utf-8",
+      responseHeaders: upstreamHeaders,
+    });
 
     writeStatus({
       ok: true,
@@ -502,51 +597,152 @@ async function handleSubscription(req, res, appName = "default") {
       "Access-Control-Allow-Origin": "*",
     });
     res.end(out);
+    logRequest({
+      route: "/sub",
+      status: 200,
+      app: appName,
+      useConverter,
+      contentType: "text/yaml; charset=utf-8",
+      responseStatus: fetched.responseStatus,
+      conversion,
+      bytes: out.length,
+      durationMs: Date.now() - startedAtMs,
+    });
   } catch (e) {
     res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(`failed to fetch subscription: ${e?.message || e}`);
+    logRequest({
+      route: "/sub",
+      status: 502,
+      app: appName,
+      useConverter,
+      durationMs: Date.now() - startedAtMs,
+      error: e?.message || String(e),
+    });
   }
 }
 
-function handleLast(req, res) {
+async function handleLast(req, res) {
+  const startedAtMs = Date.now();
   const reqUrl = new URL(req.url || "/", "http://localhost");
   const subUrl = pickSubUrl(reqUrl, req.headers);
   const useConverter = pickUseConverter(reqUrl, req.headers);
   const appName = pickAppName(reqUrl);
+  const hwidOverride =
+    reqUrl.searchParams.get("hwid") ?? firstHeaderValue(req.headers["x-hwid"]);
 
   if (!subUrl) {
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("SUB_URL is required (use ?sub_url= or X-Sub-Url header)");
+    logRequest({
+      route: "/last",
+      status: 400,
+      app: appName,
+      useConverter,
+      durationMs: Date.now() - startedAtMs,
+      error: "missing sub_url",
+    });
     return;
+  }
+
+  let refreshed = null;
+  try {
+    refreshed = await refreshCache(req.headers, subUrl, useConverter, appName, hwidOverride);
+  } catch {
+    refreshed = null;
+  }
+  if (refreshed && refreshed.ok) {
+    res.writeHead(200, {
+      ...refreshed.responseHeaders,
+      "Content-Type": refreshed.contentType,
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(refreshed.body);
+    logRequest({
+      route: "/last",
+      status: 200,
+      app: appName,
+      useConverter,
+      cache: "refreshed",
+      contentType: refreshed.contentType,
+      bytes: refreshed.body.length,
+      durationMs: Date.now() - startedAtMs,
+    });
+    return;
+  }
+  if (refreshed && !refreshed.ok) {
+    logRequest({
+      route: "/last",
+      status: 200,
+      app: appName,
+      useConverter,
+      cache: "refresh-failed",
+      durationMs: Date.now() - startedAtMs,
+      error: refreshed.error,
+    });
   }
 
   const key = cacheKey(subUrl, useConverter, appName);
   const path = cachePathForKey(key);
   try {
     let contentType = "text/yaml; charset=utf-8";
+    let responseHeaders = {};
     try {
       const meta = JSON.parse(fs.readFileSync(cacheMetaPathForKey(key), "utf8"));
       if (meta && typeof meta.contentType === "string") {
         contentType = meta.contentType;
+      }
+      if (meta && typeof meta.responseHeaders === "object" && meta.responseHeaders) {
+        responseHeaders = meta.responseHeaders;
       }
     } catch {
       // ignore missing/invalid metadata
     }
     const body = fs.readFileSync(path);
     res.writeHead(200, {
+      ...responseHeaders,
       "Content-Type": contentType,
       "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
     });
     res.end(body);
+    if (!refreshed || refreshed.ok !== true) {
+      logRequest({
+        route: "/last",
+        status: 200,
+        app: appName,
+        useConverter,
+        cache: "hit",
+        contentType,
+        bytes: body.length,
+        durationMs: Date.now() - startedAtMs,
+      });
+    }
   } catch (err) {
     if (err && err.code === "ENOENT") {
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("no cached subscription for provided parameters");
+      logRequest({
+        route: "/last",
+        status: 404,
+        app: appName,
+        useConverter,
+        cache: "miss",
+        durationMs: Date.now() - startedAtMs,
+      });
       return;
     }
     res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("failed to read cached subscription");
+    logRequest({
+      route: "/last",
+      status: 500,
+      app: appName,
+      useConverter,
+      durationMs: Date.now() - startedAtMs,
+      error: err?.message || String(err),
+    });
   }
 }
 
@@ -559,7 +755,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.method === "GET" && path === "/last") {
-    handleLast(req, res);
+    void handleLast(req, res);
     return;
   }
   if (req.method === "GET" && path === "/subscription.yaml") {
