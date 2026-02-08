@@ -1,37 +1,38 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `app/server.js` is the Node.js HTTP service that fetches and converts subscriptions.
-- `app/package.json` defines the Node module type (ESM) and repo name.
-- `docker-compose.yml` wires the fetcher service, nginx, and a subconverter container.
-- `docker-compose.single.yml` builds a single-container setup without nginx.
-- `Dockerfile.allinone` and `docker-compose.allinone.yml` run fetcher + subconverter in one container.
-- `nginx/default.conf` proxies `/sub` and `/last` to the fetcher (legacy `/subscription.yaml`, `/happ.sub.yaml` still work).
-- `data/` is a shared volume for input and generated artifacts (`raw.txt`, `subscription.yaml`, `status.json`, `converted.txt`).
+- `app/server.js` hosts the Node.js HTTP service that fetches and converts subscription data.
+- `app/package.json` defines the Node module type and project metadata.
+- `data/` is a bind-mounted volume for runtime artifacts (`raw.txt`, `subscription.yaml`, cache files).
+- `Dockerfile` builds a container that runs both the app and the bundled subconverter.
+- `docker-compose.yml` wires ports, environment variables, and the `data/` volume.
+- `entrypoint.sh` bootstraps the subconverter and starts the Node server.
 
 ## Build, Test, and Development Commands
-- `docker compose up --build` starts the full stack (fetcher, converter, nginx).
-- `docker compose -f docker-compose.single.yml up --build` starts the single-container setup on port 25500.
-- `docker compose -f docker-compose.allinone.yml up --build` starts the all-in-one container (fetcher on 25500, converter on 25501).
-- `docker compose down` stops and removes the stack.
-- `node app/server.js` runs the fetcher locally (set `SUB_URL`, `CONVERTER_URL`, `SOURCE_URL`, `PORT`).
-- `curl "http://localhost:25500/sub?sub_url=..."` validates nginx + fetcher flow.
+- `docker compose up --build` builds the image and runs the app + subconverter stack.
+- `docker compose up` starts the stack using existing images.
+- `docker compose down` stops containers and removes the stack.
+- `node app/server.js` runs the HTTP service locally (requires Node 18+ and expected env vars).
 
 ## Coding Style & Naming Conventions
-- JavaScript (ESM) with 2-space indentation; prefer `const`/`let` and explicit names.
-- Environment variables are upper snake case (`SUB_URL`, `USE_CONVERTER`, `CONVERTER_URL`).
-- Output files in `/data` use lowercase with dots (`subscription.yaml`, `status.json`).
+- JavaScript is written as ES modules (`import ... from`).
+- Use 2-space indentation and double quotes to match `app/server.js`.
+- Prefer descriptive, verb-led function names (e.g., `handleSubscription`, `refreshCache`).
+- Keep constants uppercase with underscores for environment-driven values.
+- No formatter or linter is configured; match existing style manually.
 
 ## Testing Guidelines
-- No automated tests are present. If you add tests, place them under `app/` and document the run command (e.g., `node --test`).
-- Manual checks should cover `/sub`, `/last`, and `/health` endpoints.
+- No automated test suite is present.
+- When changing request handling or conversion logic, validate manually:
+  - `curl "http://localhost:8788/sub?sub_url=..."` for fresh fetch.
+  - `curl "http://localhost:8788/last?sub_url=..."` for cache behavior.
 
 ## Commit & Pull Request Guidelines
-- Git history does not show a consistent commit message convention; keep messages short and imperative (e.g., "Add health check").
-- PRs should describe changes, include relevant environment variables, and note any manual test commands run.
+- Recent commits use short, imperative, sentence-case summaries (e.g., "Add Docker integration...").
+- Keep commit messages concise and scoped to one change set.
+- PRs should describe the behavior change, config/env updates, and any new ports or endpoints.
+- Include example commands or curl calls when behavior changes are not obvious.
 
-## Configuration & Operational Notes
-- `USE_CONVERTER=1` enables subconverter; otherwise, the service falls back to VLESS-only conversion.
-- `app=happ` and `hwid=...` query parameters affect request headers; `/last` serves the last cached subscription for the same `sub_url`/`use_converter`/`app` tuple.
-- The service writes to `/data` and expects it to be writable by the container/user.
-- Nginx exposes `http://localhost:25500/` for static files and proxies subscription endpoints.
+## Configuration Notes
+- Runtime behavior is controlled via env vars like `SUB_URL`, `USE_CONVERTER`, `CONVERTER_URL`.
+- Ports default to `APP_PORT=8788` and `SUBCONVERTER_PORT=8787` (see `docker-compose.yml`).

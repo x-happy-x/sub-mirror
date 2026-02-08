@@ -1,61 +1,52 @@
-# Sub Mirror
+# sub-mirror
 
-Small HTTP service that fetches a subscription URL, optionally converts it to Clash
-provider YAML, and caches the result.
+Сервис зеркалирует подписки и при необходимости конвертирует их в формат Clash.
+В контейнере запускаются два процесса: Node.js приложение и subconverter.
 
-## Quick start (Docker Compose)
+## Возможности
+- Проксирование подписки с сохранением оригинального ответа.
+- Конвертация через subconverter или встроенный fallback для VLESS.
+- Кэширование результата на диске и выдача последней успешной версии.
+- Простые эндпоинты для проверки состояния.
 
-Start full stack (fetcher + converter + nginx):
-
+## Быстрый старт (Docker)
 ```bash
 docker compose up --build
 ```
+Порты по умолчанию:
+- `8788` — Node.js приложение
+- `8787` — subconverter
 
-Send a request through nginx:
-
+## Локальный запуск (без Docker)
+Требуется Node.js 18+.
 ```bash
-curl "http://localhost:25500/sub?sub_url=https%3A%2F%2Fexample.com%2Fsub%3Ftoken%3Ddemo&use_converter=0&app=happ"
-```
-
-Get the last cached response (refresh is attempted first, fallback to cache):
-
-```bash
-curl "http://localhost:25500/last?sub_url=https%3A%2F%2Fexample.com%2Fsub%3Ftoken%3Ddemo&use_converter=0&app=happ"
-```
-
-## Single-container setup
-
-```bash
-docker compose -f docker-compose.single.yml up --build
-```
-
-## All-in-one container
-
-```bash
-docker compose -f docker-compose.allinone.yml up --build
-```
-
-## Local run (no Docker)
-
-```bash
-export SUB_URL="https://example.com/sub?token=demo"
-export USE_CONVERTER=0
+export SUB_URL="https://example.com/sub"
+export USE_CONVERTER=1
 export CONVERTER_URL="http://127.0.0.1:8787/sub"
 export SOURCE_URL="http://127.0.0.1:8788/source.txt"
-export PORT=8787
-
 node app/server.js
 ```
 
-Then:
+## Основные эндпоинты
+- `GET /sub?sub_url=...` — получить подписку с конвертацией (если включена).
+- `GET /last?sub_url=...` — отдать последнюю успешную версию из кэша.
+- `GET /health` — простая проверка живости.
+- `GET /raw.txt`, `/subscription.yaml`, `/converted.txt`, `/status.json` — статические файлы из `data/`.
 
+Пример:
 ```bash
-curl "http://localhost:8787/sub?sub_url=https%3A%2F%2Fexample.com%2Fsub%3Ftoken%3Ddemo&use_converter=0"
+curl "http://localhost:8788/sub?sub_url=https://example.com/sub"
 ```
 
-## Notes
+## Конфигурация
+Основные переменные окружения:
+- `SUB_URL` — URL подписки по умолчанию.
+- `USE_CONVERTER` — `1`/`0`, включить subconverter.
+- `CONVERTER_URL` — URL subconverter (по умолчанию `http://127.0.0.1:8787/sub`).
+- `SOURCE_URL` — URL, который subconverter использует для чтения исходного файла.
+- `APP_PORT`, `SUBCONVERTER_PORT` — порты приложения и subconverter.
 
-- `/sub` fetches and returns a fresh subscription (and writes cache).
-- `/last` first tries to refresh the cache; on failure or empty result, it serves
-  the last cached file and returns cached upstream headers (if available).
-- Output and cache files live in `data/` and are ignored by git.
+## Данные и кэш
+- `data/` монтируется как volume и хранит:
+  - `raw.txt`, `subscription.yaml`, `converted.txt`, `status.json`
+  - `cache/` — кэшированные ответы
