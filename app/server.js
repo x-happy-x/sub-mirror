@@ -26,53 +26,6 @@ const STATIC_FILES = new Map([
   ["/converted.txt", { path: OUT_CONVERTED, type: "text/plain; charset=utf-8" }],
   ["/source.txt", { path: SOURCE_PATH, type: "text/plain; charset=utf-8" }],
 ]);
-const RANDOM_PROFILE_TEMPLATES = [
-  {
-    id: "linux-notebook",
-    deviceModel: "anastasia-HP-255-G8-Notebook-PC_x86_64",
-    os: "Linux",
-    osVersion: "ubuntu_22.04",
-    connectedAt: "24.01.2026 12:12",
-    userAgent: "Happ/2.0.1/Linux",
-    hwid: "800004fdfd6641f3a595c2dd455bfa8a",
-  },
-  {
-    id: "aqm-lx1",
-    deviceModel: "AQM-LX1",
-    os: "Android",
-    osVersion: "10",
-    connectedAt: "24.01.2026 12:09",
-    userAgent: "Happ/3.3.4",
-    hwid: "0943e686eec9f55e",
-  },
-  {
-    id: "2509fpn0bc",
-    deviceModel: "2509FPN0BC",
-    os: "Android",
-    osVersion: "16",
-    connectedAt: "18.01.2026 17:50",
-    userAgent: "Happ/3.10.0",
-    hwid: "ab9a20e5bc21d63e",
-  },
-  {
-    id: "iphone-13-mini",
-    deviceModel: "iPhone 13 mini",
-    os: "iOS",
-    osVersion: "26.1",
-    connectedAt: "09.01.2026 17:21",
-    userAgent: "Happ/3.5.2/ios CFNetwork/3860.200.71 Darwin/25.1.0",
-    hwid: "bd6d054bb05c1775",
-  },
-  {
-    id: "pc-x-x86-64",
-    deviceModel: "PC-X_x86_64",
-    os: "Windows",
-    osVersion: "11_10.0.28000",
-    connectedAt: "30.11.2025 14:56",
-    userAgent: "Happ/1.0.1/Windows",
-    hwid: "648de419-b18e-4fe9-8bfa-a5d5e2784928",
-  },
-];
 
 function isHtml(s) {
   const t = s.trim().toLowerCase();
@@ -335,77 +288,6 @@ function parseOptionalBool(v) {
   const value = firstHeaderValue(v);
   if (value === undefined || value === null || value === "") return undefined;
   return parseBool(value, false);
-}
-
-function randomHex(length) {
-  const bytes = crypto.randomBytes(Math.ceil(length / 2)).toString("hex");
-  return bytes.slice(0, length);
-}
-
-function randomUuidV4() {
-  const bytes = crypto.randomBytes(16);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function randomHwidLike(sample) {
-  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(sample)) {
-    return randomUuidV4();
-  }
-  if (/^[0-9a-fA-F]+$/.test(sample)) {
-    return randomHex(sample.length);
-  }
-  return randomHex(16);
-}
-
-function pickRandomTemplate() {
-  const index = Math.floor(Math.random() * RANDOM_PROFILE_TEMPLATES.length);
-  return RANDOM_PROFILE_TEMPLATES[index];
-}
-
-function buildRandomProfilePayload(reqUrl) {
-  const templateId = reqUrl.searchParams.get("template");
-  const template = templateId
-    ? RANDOM_PROFILE_TEMPLATES.find((item) => item.id === templateId)
-    : pickRandomTemplate();
-  if (!template) {
-    return {
-      ok: false,
-      status: 400,
-      error: `unknown template: ${templateId}`,
-    };
-  }
-  const fixedHwid = parseBool(reqUrl.searchParams.get("fixed_hwid"), false);
-  const profileName =
-    reqUrl.searchParams.get("name") ||
-    `${template.id}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-  const profile = {
-    sub_url: "",
-    use_converter: true,
-    header_policy: "file_only",
-    allow_hwid_override: !fixedHwid,
-    headers: {
-      "user-agent": template.userAgent,
-      "x-device-os": template.os,
-      "x-ver-os": template.osVersion,
-      "x-device-model": template.deviceModel,
-      "x-device-locale": "en-US",
-      "x-hwid": fixedHwid ? template.hwid : randomHwidLike(template.hwid),
-      "accept-language": "en-US,en;q=0.9",
-      "accept-encoding": "gzip, deflate",
-    },
-    required_headers: [],
-  };
-  const profileYaml = buildYaml(profile);
-  return {
-    ok: true,
-    template,
-    profileName,
-    profile,
-    profileYaml,
-  };
 }
 
 function unquoteYamlValue(value) {
@@ -1116,58 +998,6 @@ async function handleEcho(req, res) {
   }
 }
 
-function handleRandomProfile(req, res) {
-  const reqUrl = new URL(req.url || "/", "http://localhost");
-  const built = buildRandomProfilePayload(reqUrl);
-  if (!built.ok) {
-    res.writeHead(built.status || 400, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end(built.error || "failed to generate profile");
-    return;
-  }
-  const format = (reqUrl.searchParams.get("format") || "json").toLowerCase();
-  const shouldSave = parseBool(reqUrl.searchParams.get("save"), false);
-  let savedPath = "";
-  if (shouldSave) {
-    const safeName = built.profileName.replace(/[^a-zA-Z0-9._-]/g, "-");
-    fs.mkdirSync(PROFILE_FALLBACK_DIR, { recursive: true });
-    savedPath = path.join(PROFILE_FALLBACK_DIR, `${safeName}.yml`);
-    fs.writeFileSync(savedPath, `${built.profileYaml}\n`);
-  }
-  if (format === "yml" || format === "yaml") {
-    res.writeHead(200, {
-      "Content-Type": "text/yaml; charset=utf-8",
-      "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-    });
-    if (savedPath) {
-      res.end(`${built.profileYaml}\n# saved_to: ${savedPath}`);
-      return;
-    }
-    res.end(built.profileYaml);
-    return;
-  }
-  res.writeHead(200, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Access-Control-Allow-Origin": "*",
-  });
-  res.end(
-    JSON.stringify(
-      {
-        ok: true,
-        generatedAt: new Date().toISOString(),
-        template: built.template,
-        profileName: built.profileName,
-        savedPath: savedPath || undefined,
-        profile: built.profile,
-        yml: built.profileYaml,
-      },
-      null,
-      2,
-    ),
-  );
-}
-
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
   const path = url.pathname;
@@ -1185,10 +1015,6 @@ const server = http.createServer((req, res) => {
   }
   if (path === "/debug/echo") {
     void handleEcho(req, res);
-    return;
-  }
-  if (req.method === "GET" && path === "/profile/random") {
-    handleRandomProfile(req, res);
     return;
   }
   const staticEntry = STATIC_FILES.get(path);

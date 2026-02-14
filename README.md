@@ -40,7 +40,6 @@ node app/server.js
 - `GET /last?sub_url=...` — отдать последнюю успешную версию из кэша.
 - `GET /health` — простая проверка живости.
 - `ANY /debug/echo` — отладочный endpoint: возвращает метод, query, заголовки и тело запроса.
-- `GET /profile/random` — генератор случайного профиля по шаблонам устройств.
 - `GET /raw.txt`, `/subscription.yaml`, `/converted.txt`, `/status.json` — статические файлы из `data/`.
 
 Пример:
@@ -117,39 +116,6 @@ curl -X POST "http://localhost:8788/debug/echo?x=1&x=2" \
   -H "Content-Type: application/json" \
   -d '{"ping":"pong"}'
 ```
-
-## Генератор случайного профиля
-Вернуть JSON:
-```bash
-curl "http://localhost:8788/profile/random"
-```
-
-Вернуть сразу YAML:
-```bash
-curl "http://localhost:8788/profile/random?format=yml"
-```
-
-Фиксированный (незаменяемый) HWID:
-```bash
-curl "http://localhost:8788/profile/random?fixed_hwid=1&format=yml"
-```
-
-Выбор конкретного шаблона:
-```bash
-curl "http://localhost:8788/profile/random?template=iphone-13-mini&format=yml"
-```
-
-Сразу сохранить в `./profiles`:
-```bash
-curl "http://localhost:8788/profile/random?template=aqm-lx1&name=my-phone-profile&save=1&format=yml"
-```
-
-Поддерживаемые `template`:
-- `linux-notebook`
-- `aqm-lx1`
-- `2509fpn0bc`
-- `iphone-13-mini`
-- `pc-x-x86-64`
 
 ## Конфигурация
 Основные переменные окружения:
