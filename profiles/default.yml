@@ -1,0 +1,14 @@
+sub_url: ""
+use_converter: false
+header_policy: prefer_request
+allow_hwid_override: true
+headers:
+  user-agent: "Happ/1.0.0/Windows"
+  x-device-os: "Windows"
+  x-ver-os: "10"
+  x-device-model: "Windows-PC"
+  x-device-locale: "en-US"
+  x-hwid: "9b4d6d9e-c5f6-4a8d-b9cf-31772ce7e0e1"
+  accept-language: "en-US,en;q=0.9"
+  accept-encoding: "gzip, deflate"
+required_headers: []

@@ -6,10 +6,12 @@ services:
       - "0.0.0.0:25501:8787"
     volumes:
       - ./data:/data
+      - ./profiles:/profiles:ro
     environment:
       SUB_URL: ""
       USE_CONVERTER: "1"
       CONVERTER_URL: "http://127.0.0.1:8787/sub"
       SOURCE_URL: "http://127.0.0.1:8788/source.txt"
+      PROFILE_DIR: "/profiles"
       APP_PORT: "8788"
       SUBCONVERTER_PORT: "8787"

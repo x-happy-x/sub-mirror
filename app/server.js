@@ -1,11 +1,18 @@
 import http from "node:http";
 import fs from "node:fs";
 import crypto from "node:crypto";
+import path from "node:path";
 const SUB_URL_DEFAULT = process.env.SUB_URL || "";
 const USE_CONVERTER_DEFAULT = process.env.USE_CONVERTER === "1";
 const CONVERTER_URL = process.env.CONVERTER_URL || "";
 const SOURCE_URL = process.env.SOURCE_URL || "http://web/source.txt";
 const PORT = Number(process.env.PORT || "8787");
+const PROFILE_DIR_ENV = process.env.PROFILE_DIR || "";
+const PROFILE_FALLBACK_DIR = path.resolve(process.cwd(), "profiles");
+const PROFILE_DIRS = PROFILE_DIR_ENV
+  ? [PROFILE_DIR_ENV]
+  : ["/data/profiles", PROFILE_FALLBACK_DIR];
+const HEADER_POLICY_DEFAULT = "prefer_request";
 
 const OUT_RAW = "/data/raw.txt";
 const OUT_YAML = "/data/subscription.yaml";
@@ -19,6 +26,53 @@ const STATIC_FILES = new Map([
   ["/converted.txt", { path: OUT_CONVERTED, type: "text/plain; charset=utf-8" }],
   ["/source.txt", { path: SOURCE_PATH, type: "text/plain; charset=utf-8" }],
 ]);
+const RANDOM_PROFILE_TEMPLATES = [
+  {
+    id: "linux-notebook",
+    deviceModel: "anastasia-HP-255-G8-Notebook-PC_x86_64",
+    os: "Linux",
+    osVersion: "ubuntu_22.04",
+    connectedAt: "24.01.2026 12:12",
+    userAgent: "Happ/2.0.1/Linux",
+    hwid: "800004fdfd6641f3a595c2dd455bfa8a",
+  },
+  {
+    id: "aqm-lx1",
+    deviceModel: "AQM-LX1",
+    os: "Android",
+    osVersion: "10",
+    connectedAt: "24.01.2026 12:09",
+    userAgent: "Happ/3.3.4",
+    hwid: "0943e686eec9f55e",
+  },
+  {
+    id: "2509fpn0bc",
+    deviceModel: "2509FPN0BC",
+    os: "Android",
+    osVersion: "16",
+    connectedAt: "18.01.2026 17:50",
+    userAgent: "Happ/3.10.0",
+    hwid: "ab9a20e5bc21d63e",
+  },
+  {
+    id: "iphone-13-mini",
+    deviceModel: "iPhone 13 mini",
+    os: "iOS",
+    osVersion: "26.1",
+    connectedAt: "09.01.2026 17:21",
+    userAgent: "Happ/3.5.2/ios CFNetwork/3860.200.71 Darwin/25.1.0",
+    hwid: "bd6d054bb05c1775",
+  },
+  {
+    id: "pc-x-x86-64",
+    deviceModel: "PC-X_x86_64",
+    os: "Windows",
+    osVersion: "11_10.0.28000",
+    connectedAt: "30.11.2025 14:56",
+    userAgent: "Happ/1.0.1/Windows",
+    hwid: "648de419-b18e-4fe9-8bfa-a5d5e2784928",
+  },
+];
 
 function isHtml(s) {
   const t = s.trim().toLowerCase();
@@ -203,8 +257,8 @@ function ensureCacheDir() {
   }
 }
 
-function cacheKey(subUrl, useConverter, appName) {
-  return sha1(`${subUrl}|${useConverter ? "1" : "0"}|${appName}`);
+function cacheKey(subUrl, useConverter, profileKey = "") {
+  return sha1(`${subUrl}|${useConverter ? "1" : "0"}|${profileKey}`);
 }
 
 function cachePathForKey(key) {
@@ -257,47 +311,287 @@ function parseBool(v, fallback = false) {
   return s === "1" || s === "true" || s === "yes" || s === "on";
 }
 
-function pickSubUrl(reqUrl, reqHeaders) {
-  const subFromQuery = reqUrl.searchParams.get("sub_url");
-  const subFromHeader = firstHeaderValue(reqHeaders["x-sub-url"]);
-  return subFromQuery || subFromHeader || SUB_URL_DEFAULT;
-}
-
-function pickUseConverter(reqUrl, reqHeaders) {
-  const fromQuery = reqUrl.searchParams.get("use_converter");
-  const fromHeader = reqHeaders["x-use-converter"];
-  return parseBool(fromQuery ?? fromHeader, USE_CONVERTER_DEFAULT);
-}
-
-function pickAppName(reqUrl) {
-  const app = reqUrl.searchParams.get("app");
-  return app && app.trim() ? app.trim() : "default";
-}
-
 function sanitizeForwardHeaders(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
     if (v === undefined) continue;
     const key = k.toLowerCase();
     if (key === "host" || key === "connection" || key === "content-length") continue;
-    if (key === "x-sub-url" || key === "x-use-converter") continue;
+    if (
+      key === "x-sub-url" ||
+      key === "x-use-converter" ||
+      key === "x-profile" ||
+      key === "x-profiles"
+    ) {
+      continue;
+    }
     const value = firstHeaderValue(v);
     if (value !== undefined) out[key] = String(value);
   }
   return out;
 }
 
-function happHeaders(hwidOverride) {
-  const hwid = hwidOverride || "648de419-b18e-4fe9-8bfa-a5d5e2784928";
+function parseOptionalBool(v) {
+  const value = firstHeaderValue(v);
+  if (value === undefined || value === null || value === "") return undefined;
+  return parseBool(value, false);
+}
+
+function randomHex(length) {
+  const bytes = crypto.randomBytes(Math.ceil(length / 2)).toString("hex");
+  return bytes.slice(0, length);
+}
+
+function randomUuidV4() {
+  const bytes = crypto.randomBytes(16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function randomHwidLike(sample) {
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(sample)) {
+    return randomUuidV4();
+  }
+  if (/^[0-9a-fA-F]+$/.test(sample)) {
+    return randomHex(sample.length);
+  }
+  return randomHex(16);
+}
+
+function pickRandomTemplate() {
+  const index = Math.floor(Math.random() * RANDOM_PROFILE_TEMPLATES.length);
+  return RANDOM_PROFILE_TEMPLATES[index];
+}
+
+function buildRandomProfilePayload(reqUrl) {
+  const templateId = reqUrl.searchParams.get("template");
+  const template = templateId
+    ? RANDOM_PROFILE_TEMPLATES.find((item) => item.id === templateId)
+    : pickRandomTemplate();
+  if (!template) {
+    return {
+      ok: false,
+      status: 400,
+      error: `unknown template: ${templateId}`,
+    };
+  }
+  const fixedHwid = parseBool(reqUrl.searchParams.get("fixed_hwid"), false);
+  const profileName =
+    reqUrl.searchParams.get("name") ||
+    `${template.id}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const profile = {
+    sub_url: "",
+    use_converter: true,
+    header_policy: "file_only",
+    allow_hwid_override: !fixedHwid,
+    headers: {
+      "user-agent": template.userAgent,
+      "x-device-os": template.os,
+      "x-ver-os": template.osVersion,
+      "x-device-model": template.deviceModel,
+      "x-device-locale": "en-US",
+      "x-hwid": fixedHwid ? template.hwid : randomHwidLike(template.hwid),
+      "accept-language": "en-US,en;q=0.9",
+      "accept-encoding": "gzip, deflate",
+    },
+    required_headers: [],
+  };
+  const profileYaml = buildYaml(profile);
   return {
-    "user-agent": "Happ/1.0.1/Windows",
-    "x-device-locale": "RU",
-    "x-device-os": "Windows",
-    "x-device-model": "PC-X_x86_64",
-    "x-hwid": hwid,
-    "x-ver-os": "11_10.0.28000",
-    "accept-language": "ru-RU,en,*",
-    "accept-encoding": "gzip, deflate",
+    ok: true,
+    template,
+    profileName,
+    profile,
+    profileYaml,
+  };
+}
+
+function unquoteYamlValue(value) {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\"/g, '"');
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/\\'/g, "'");
+  }
+  return value;
+}
+
+function parseProfileYaml(content) {
+  const profile = {
+    subUrl: "",
+    useConverter: undefined,
+    headerPolicy: HEADER_POLICY_DEFAULT,
+    allowHwidOverride: true,
+    headers: {},
+    requiredHeaders: [],
+  };
+  let section = "";
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    const raw = line.replace(/\t/g, "  ");
+    const commentCut = raw.indexOf("#");
+    const cleaned = commentCut >= 0 ? raw.slice(0, commentCut) : raw;
+    const trimmed = cleaned.trim();
+    if (!trimmed) continue;
+
+    const indent = cleaned.match(/^ */)?.[0].length ?? 0;
+    if (indent === 0) {
+      section = "";
+      const keyMatch = trimmed.match(/^([a-zA-Z0-9_]+)\s*:\s*(.*)$/);
+      if (!keyMatch) continue;
+      const key = keyMatch[1];
+      const value = unquoteYamlValue((keyMatch[2] || "").trim());
+
+      if (key === "sub_url") {
+        profile.subUrl = value;
+      } else if (key === "use_converter") {
+        if (value !== "") profile.useConverter = parseBool(value, false);
+      } else if (key === "header_policy") {
+        if (value) profile.headerPolicy = value.toLowerCase();
+      } else if (key === "allow_hwid_override") {
+        if (value !== "") profile.allowHwidOverride = parseBool(value, true);
+      } else if (key === "headers" || key === "required_headers") {
+        section = key;
+      }
+      continue;
+    }
+
+    if (section === "headers") {
+      const pair = trimmed.match(/^([A-Za-z0-9-]+)\s*:\s*(.*)$/);
+      if (!pair) continue;
+      profile.headers[pair[1].toLowerCase()] = unquoteYamlValue((pair[2] || "").trim());
+      continue;
+    }
+
+    if (section === "required_headers") {
+      const item = trimmed.match(/^-\s*(.+)$/);
+      if (!item) continue;
+      profile.requiredHeaders.push(unquoteYamlValue(item[1].trim()).toLowerCase());
+    }
+  }
+  return profile;
+}
+
+function readProfileFile(profileName) {
+  for (const dir of PROFILE_DIRS) {
+    const ymlPath = path.join(dir, `${profileName}.yml`);
+    const yamlPath = path.join(dir, `${profileName}.yaml`);
+    let filePath = "";
+    if (fs.existsSync(ymlPath)) filePath = ymlPath;
+    else if (fs.existsSync(yamlPath)) filePath = yamlPath;
+    if (!filePath) continue;
+    const content = fs.readFileSync(filePath, "utf8");
+    return parseProfileYaml(content);
+  }
+  return null;
+}
+
+function pickProfileNames(reqUrl, reqHeaders, forcedProfileName = "") {
+  const rawNames = [
+    ...reqUrl.searchParams.getAll("profile"),
+    ...reqUrl.searchParams.getAll("profiles"),
+    firstHeaderValue(reqHeaders["x-profile"]) || "",
+    firstHeaderValue(reqHeaders["x-profiles"]) || "",
+  ];
+  if (forcedProfileName) {
+    rawNames.push(forcedProfileName);
+  }
+  const out = [];
+  for (const raw of rawNames) {
+    for (const part of String(raw || "").split(",")) {
+      const name = part.trim();
+      if (!name) continue;
+      if (!/^[a-zA-Z0-9._-]+$/.test(name)) continue;
+      if (!out.includes(name)) out.push(name);
+    }
+  }
+  return out;
+}
+
+function mergeProfiles(profileNames) {
+  const merged = {
+    subUrl: "",
+    useConverter: undefined,
+    headerPolicy: HEADER_POLICY_DEFAULT,
+    allowHwidOverride: true,
+    headers: {},
+    requiredHeaders: [],
+  };
+  for (const name of profileNames) {
+    const profile = readProfileFile(name);
+    if (!profile) {
+      return { ok: false, error: `profile not found: ${name}` };
+    }
+    if (profile.subUrl) merged.subUrl = profile.subUrl;
+    if (profile.useConverter !== undefined) merged.useConverter = profile.useConverter;
+    if (profile.headerPolicy) merged.headerPolicy = profile.headerPolicy;
+    merged.allowHwidOverride = profile.allowHwidOverride !== false;
+    merged.headers = { ...merged.headers, ...profile.headers };
+    for (const key of profile.requiredHeaders) {
+      if (!merged.requiredHeaders.includes(key)) merged.requiredHeaders.push(key);
+    }
+  }
+  const validPolicies = new Set(["prefer_request", "file_only", "require_request"]);
+  if (!validPolicies.has(merged.headerPolicy)) {
+    return { ok: false, error: `unsupported header_policy: ${merged.headerPolicy}` };
+  }
+  return { ok: true, profile: merged };
+}
+
+function resolveForwardHeaders(reqHeaders, profile, hwidOverride) {
+  const incoming = sanitizeForwardHeaders(reqHeaders);
+  const fromProfile = { ...profile.headers };
+  if (hwidOverride && profile.allowHwidOverride !== false) {
+    fromProfile["x-hwid"] = hwidOverride;
+  }
+
+  if (profile.headerPolicy === "require_request") {
+    for (const required of profile.requiredHeaders) {
+      if (!incoming[required]) {
+        return { ok: false, error: `required header is missing: ${required}` };
+      }
+    }
+  }
+
+  if (profile.headerPolicy === "file_only") {
+    return { ok: true, headers: { ...incoming, ...fromProfile } };
+  }
+  return { ok: true, headers: { ...fromProfile, ...incoming } };
+}
+
+function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
+  const profileNames = pickProfileNames(reqUrl, reqHeaders, forcedProfileName);
+  const merged = mergeProfiles(profileNames);
+  if (!merged.ok) {
+    return { ok: false, status: 400, error: merged.error };
+  }
+
+  const subFromQuery = reqUrl.searchParams.get("sub_url");
+  const subFromHeader = firstHeaderValue(reqHeaders["x-sub-url"]);
+  const subUrl = subFromQuery || subFromHeader || merged.profile.subUrl || SUB_URL_DEFAULT;
+
+  const fromQuery = reqUrl.searchParams.get("use_converter");
+  const fromHeader = reqHeaders["x-use-converter"];
+  const explicitUseConverter = parseOptionalBool(fromQuery ?? fromHeader);
+  const useConverter =
+    explicitUseConverter ??
+    (merged.profile.useConverter !== undefined ? merged.profile.useConverter : USE_CONVERTER_DEFAULT);
+
+  const hwidOverride =
+    reqUrl.searchParams.get("hwid") ?? firstHeaderValue(reqHeaders["x-hwid"]);
+  const resolvedHeaders = resolveForwardHeaders(reqHeaders, merged.profile, hwidOverride);
+  if (!resolvedHeaders.ok) {
+    return { ok: false, status: 400, error: resolvedHeaders.error };
+  }
+
+  return {
+    ok: true,
+    subUrl,
+    useConverter,
+    profileNames,
+    forwardHeaders: resolvedHeaders.headers,
   };
 }
 
@@ -354,9 +648,7 @@ async function fetchWithNode(subUrl, forwardHeaders) {
   return { body, responseHeaders, responseStatus, responseUrl };
 }
 
-async function refreshCache(reqHeaders, subUrl, useConverter, appName, hwidOverride) {
-  const forwardHeaders =
-    appName === "happ" ? happHeaders(hwidOverride) : sanitizeForwardHeaders(reqHeaders);
+async function refreshCache(subUrl, useConverter, profileNames, forwardHeaders) {
   const fetched = await fetchWithNode(subUrl, forwardHeaders);
   const raw = fetched.body;
   if (!raw || raw.trim().length === 0) {
@@ -396,7 +688,7 @@ async function refreshCache(reqHeaders, subUrl, useConverter, appName, hwidOverr
   const contentType = isYaml ? "text/yaml; charset=utf-8" : "text/plain; charset=utf-8";
   const upstreamHeaders = sanitizeUpstreamResponseHeaders(fetched.responseHeaders);
   ensureCacheDir();
-  const cacheKeyValue = cacheKey(subUrl, useConverter, appName);
+  const cacheKeyValue = cacheKey(subUrl, useConverter, profileNames.join(","));
   const cachePath = cachePathForKey(cacheKeyValue);
   fs.writeFileSync(`${cachePath}.tmp`, out);
   fs.renameSync(`${cachePath}.tmp`, cachePath);
@@ -404,13 +696,27 @@ async function refreshCache(reqHeaders, subUrl, useConverter, appName, hwidOverr
   return { ok: true, body: out, contentType, responseHeaders: upstreamHeaders };
 }
 
-async function handleSubscription(req, res, appName = "default") {
+async function handleSubscription(req, res, forcedProfileName = "") {
   const startedAtMs = Date.now();
   const reqUrl = new URL(req.url || "/", "http://localhost");
-  const subUrl = pickSubUrl(reqUrl, req.headers);
-  const useConverter = pickUseConverter(reqUrl, req.headers);
-  const hwidOverride =
-    reqUrl.searchParams.get("hwid") ?? firstHeaderValue(req.headers["x-hwid"]);
+  const config = resolveRequestConfig(reqUrl, req.headers, forcedProfileName);
+  const useConverter = config.ok ? config.useConverter : USE_CONVERTER_DEFAULT;
+
+  if (!config.ok) {
+    res.writeHead(config.status || 400, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(config.error || "invalid request");
+    logRequest({
+      route: "/sub",
+      status: config.status || 400,
+      profiles: forcedProfileName ? [forcedProfileName] : [],
+      useConverter,
+      durationMs: Date.now() - startedAtMs,
+      error: config.error || "invalid request",
+    });
+    return;
+  }
+
+  const { subUrl, profileNames, forwardHeaders } = config;
 
   if (!subUrl) {
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
@@ -418,7 +724,7 @@ async function handleSubscription(req, res, appName = "default") {
     logRequest({
       route: "/sub",
       status: 400,
-      app: appName,
+      profiles: profileNames,
       useConverter,
       durationMs: Date.now() - startedAtMs,
       error: "missing sub_url",
@@ -428,10 +734,6 @@ async function handleSubscription(req, res, appName = "default") {
 
   const startedAt = new Date().toISOString();
   try {
-    const forwardHeaders =
-      appName === "happ"
-        ? happHeaders(hwidOverride)
-        : sanitizeForwardHeaders(req.headers);
     const fetched = await fetchWithNode(subUrl, forwardHeaders);
     const raw = fetched.body;
     const upstreamHeaders = sanitizeUpstreamResponseHeaders(fetched.responseHeaders);
@@ -445,7 +747,7 @@ async function handleSubscription(req, res, appName = "default") {
         error: "empty response",
         subUrl,
         useConverter,
-        app: appName,
+        profiles: profileNames,
         responseStatus: fetched.responseStatus,
         responseUrl: fetched.responseUrl,
         responseHeaders: fetched.responseHeaders,
@@ -460,7 +762,7 @@ async function handleSubscription(req, res, appName = "default") {
         error: "got HTML (anti-bot page)",
         subUrl,
         useConverter,
-        app: appName,
+        profiles: profileNames,
         responseStatus: fetched.responseStatus,
         responseUrl: fetched.responseUrl,
         responseHeaders: fetched.responseHeaders,
@@ -497,7 +799,7 @@ async function handleSubscription(req, res, appName = "default") {
     const isYaml = looksLikeClashProviderYaml(out);
     if (!isYaml && !useConverter) {
       ensureCacheDir();
-      const cacheKeyValue = cacheKey(subUrl, useConverter, appName);
+      const cacheKeyValue = cacheKey(subUrl, useConverter, profileNames.join(","));
       const cachePath = cachePathForKey(cacheKeyValue);
       fs.writeFileSync(`${cachePath}.tmp`, out);
       fs.renameSync(`${cachePath}.tmp`, cachePath);
@@ -515,7 +817,7 @@ async function handleSubscription(req, res, appName = "default") {
         bytes: out.length,
         subUrl,
         useConverter,
-        app: appName,
+        profiles: profileNames,
         responseStatus: fetched.responseStatus,
         responseUrl: fetched.responseUrl,
         responseHeaders: fetched.responseHeaders,
@@ -533,7 +835,7 @@ async function handleSubscription(req, res, appName = "default") {
       logRequest({
         route: "/sub",
         status: 200,
-        app: appName,
+        profiles: profileNames,
         useConverter,
         contentType: "text/plain; charset=utf-8",
         responseStatus: fetched.responseStatus,
@@ -551,7 +853,7 @@ async function handleSubscription(req, res, appName = "default") {
         error: "output has no proxies:",
         subUrl,
         useConverter,
-        app: appName,
+        profiles: profileNames,
         responseStatus: fetched.responseStatus,
         responseUrl: fetched.responseUrl,
         responseHeaders: fetched.responseHeaders,
@@ -564,7 +866,7 @@ async function handleSubscription(req, res, appName = "default") {
     fs.writeFileSync(`${OUT_YAML}.tmp`, out);
     fs.renameSync(`${OUT_YAML}.tmp`, OUT_YAML);
     ensureCacheDir();
-    const cacheKeyValue = cacheKey(subUrl, useConverter, appName);
+    const cacheKeyValue = cacheKey(subUrl, useConverter, profileNames.join(","));
     const cachePath = cachePathForKey(cacheKeyValue);
     fs.writeFileSync(`${cachePath}.tmp`, out);
     fs.renameSync(`${cachePath}.tmp`, cachePath);
@@ -582,7 +884,7 @@ async function handleSubscription(req, res, appName = "default") {
       bytes: out.length,
       subUrl,
       useConverter,
-      app: appName,
+      profiles: profileNames,
       responseStatus: fetched.responseStatus,
       responseUrl: fetched.responseUrl,
       responseHeaders: fetched.responseHeaders,
@@ -600,7 +902,7 @@ async function handleSubscription(req, res, appName = "default") {
     logRequest({
       route: "/sub",
       status: 200,
-      app: appName,
+      profiles: profileNames,
       useConverter,
       contentType: "text/yaml; charset=utf-8",
       responseStatus: fetched.responseStatus,
@@ -614,7 +916,7 @@ async function handleSubscription(req, res, appName = "default") {
     logRequest({
       route: "/sub",
       status: 502,
-      app: appName,
+      profiles: profileNames,
       useConverter,
       durationMs: Date.now() - startedAtMs,
       error: e?.message || String(e),
@@ -622,14 +924,27 @@ async function handleSubscription(req, res, appName = "default") {
   }
 }
 
-async function handleLast(req, res) {
+async function handleLast(req, res, forcedProfileName = "") {
   const startedAtMs = Date.now();
   const reqUrl = new URL(req.url || "/", "http://localhost");
-  const subUrl = pickSubUrl(reqUrl, req.headers);
-  const useConverter = pickUseConverter(reqUrl, req.headers);
-  const appName = pickAppName(reqUrl);
-  const hwidOverride =
-    reqUrl.searchParams.get("hwid") ?? firstHeaderValue(req.headers["x-hwid"]);
+  const config = resolveRequestConfig(reqUrl, req.headers, forcedProfileName);
+  const useConverter = config.ok ? config.useConverter : USE_CONVERTER_DEFAULT;
+
+  if (!config.ok) {
+    res.writeHead(config.status || 400, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(config.error || "invalid request");
+    logRequest({
+      route: "/last",
+      status: config.status || 400,
+      profiles: forcedProfileName ? [forcedProfileName] : [],
+      useConverter,
+      durationMs: Date.now() - startedAtMs,
+      error: config.error || "invalid request",
+    });
+    return;
+  }
+
+  const { subUrl, profileNames, forwardHeaders } = config;
 
   if (!subUrl) {
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
@@ -637,7 +952,7 @@ async function handleLast(req, res) {
     logRequest({
       route: "/last",
       status: 400,
-      app: appName,
+      profiles: profileNames,
       useConverter,
       durationMs: Date.now() - startedAtMs,
       error: "missing sub_url",
@@ -647,7 +962,7 @@ async function handleLast(req, res) {
 
   let refreshed = null;
   try {
-    refreshed = await refreshCache(req.headers, subUrl, useConverter, appName, hwidOverride);
+    refreshed = await refreshCache(subUrl, useConverter, profileNames, forwardHeaders);
   } catch {
     refreshed = null;
   }
@@ -662,7 +977,7 @@ async function handleLast(req, res) {
     logRequest({
       route: "/last",
       status: 200,
-      app: appName,
+      profiles: profileNames,
       useConverter,
       cache: "refreshed",
       contentType: refreshed.contentType,
@@ -675,7 +990,7 @@ async function handleLast(req, res) {
     logRequest({
       route: "/last",
       status: 200,
-      app: appName,
+      profiles: profileNames,
       useConverter,
       cache: "refresh-failed",
       durationMs: Date.now() - startedAtMs,
@@ -683,7 +998,7 @@ async function handleLast(req, res) {
     });
   }
 
-  const key = cacheKey(subUrl, useConverter, appName);
+  const key = cacheKey(subUrl, useConverter, profileNames.join(","));
   const path = cachePathForKey(key);
   try {
     let contentType = "text/yaml; charset=utf-8";
@@ -711,7 +1026,7 @@ async function handleLast(req, res) {
       logRequest({
         route: "/last",
         status: 200,
-        app: appName,
+        profiles: profileNames,
         useConverter,
         cache: "hit",
         contentType,
@@ -726,7 +1041,7 @@ async function handleLast(req, res) {
       logRequest({
         route: "/last",
         status: 404,
-        app: appName,
+        profiles: profileNames,
         useConverter,
         cache: "miss",
         durationMs: Date.now() - startedAtMs,
@@ -738,7 +1053,7 @@ async function handleLast(req, res) {
     logRequest({
       route: "/last",
       status: 500,
-      app: appName,
+      profiles: profileNames,
       useConverter,
       durationMs: Date.now() - startedAtMs,
       error: err?.message || String(err),
@@ -746,12 +1061,118 @@ async function handleLast(req, res) {
   }
 }
 
+async function readRequestBody(req, maxBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error(`request body too large (max ${maxBytes} bytes)`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+async function handleEcho(req, res) {
+  const reqUrl = new URL(req.url || "/", "http://localhost");
+  try {
+    const rawBody = await readRequestBody(req);
+    const bodyText = rawBody.toString("utf8");
+    const query = {};
+    for (const [k, v] of reqUrl.searchParams.entries()) {
+      if (query[k] === undefined) {
+        query[k] = v;
+      } else if (Array.isArray(query[k])) {
+        query[k].push(v);
+      } else {
+        query[k] = [query[k], v];
+      }
+    }
+    const payload = {
+      ok: true,
+      method: req.method || "GET",
+      path: reqUrl.pathname,
+      query,
+      headers: req.headers,
+      body: bodyText,
+      bodyBase64: rawBody.toString("base64"),
+      bodyBytes: rawBody.length,
+    };
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(JSON.stringify(payload, null, 2));
+  } catch (e) {
+    res.writeHead(413, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(e?.message || "failed to read request body");
+  }
+}
+
+function handleRandomProfile(req, res) {
+  const reqUrl = new URL(req.url || "/", "http://localhost");
+  const built = buildRandomProfilePayload(reqUrl);
+  if (!built.ok) {
+    res.writeHead(built.status || 400, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(built.error || "failed to generate profile");
+    return;
+  }
+  const format = (reqUrl.searchParams.get("format") || "json").toLowerCase();
+  const shouldSave = parseBool(reqUrl.searchParams.get("save"), false);
+  let savedPath = "";
+  if (shouldSave) {
+    const safeName = built.profileName.replace(/[^a-zA-Z0-9._-]/g, "-");
+    fs.mkdirSync(PROFILE_FALLBACK_DIR, { recursive: true });
+    savedPath = path.join(PROFILE_FALLBACK_DIR, `${safeName}.yml`);
+    fs.writeFileSync(savedPath, `${built.profileYaml}\n`);
+  }
+  if (format === "yml" || format === "yaml") {
+    res.writeHead(200, {
+      "Content-Type": "text/yaml; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    if (savedPath) {
+      res.end(`${built.profileYaml}\n# saved_to: ${savedPath}`);
+      return;
+    }
+    res.end(built.profileYaml);
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(
+    JSON.stringify(
+      {
+        ok: true,
+        generatedAt: new Date().toISOString(),
+        template: built.template,
+        profileName: built.profileName,
+        savedPath: savedPath || undefined,
+        profile: built.profile,
+        yml: built.profileYaml,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
   const path = url.pathname;
   if (req.method === "GET" && path === "/sub") {
-    const appName = pickAppName(url);
-    void handleSubscription(req, res, appName);
+    void handleSubscription(req, res);
     return;
   }
   if (req.method === "GET" && path === "/last") {
@@ -759,12 +1180,15 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.method === "GET" && path === "/subscription.yaml") {
-    const appName = pickAppName(url);
-    void handleSubscription(req, res, appName);
+    void handleSubscription(req, res);
     return;
   }
-  if (req.method === "GET" && path === "/happ.sub.yaml") {
-    void handleSubscription(req, res, "happ");
+  if (path === "/debug/echo") {
+    void handleEcho(req, res);
+    return;
+  }
+  if (req.method === "GET" && path === "/profile/random") {
+    handleRandomProfile(req, res);
     return;
   }
   const staticEntry = STATIC_FILES.get(path);
