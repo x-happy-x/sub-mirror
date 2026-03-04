@@ -1,15 +1,16 @@
 import path from "node:path";
 
 const SUB_URL_DEFAULT = process.env.SUB_URL || "";
+const AUTH_SESSION_TTL_SEC = Number(process.env.AUTH_SESSION_TTL_SEC || String(60 * 60 * 24 * 30));
 const LEGACY_USE_CONVERTER_DEFAULT = process.env.USE_CONVERTER === "1";
 const OUTPUT_DEFAULT_ENV = (process.env.OUTPUT || "").trim().toLowerCase();
 const CONVERTER_URL = process.env.CONVERTER_URL || "";
 const SOURCE_URL = process.env.SOURCE_URL || "http://web/source.txt";
 const PORT = Number(process.env.PORT || "8787");
 const PROFILE_DIR_ENV = process.env.PROFILE_DIR || "";
-const PROFILE_FALLBACK_DIR = path.resolve(process.cwd(), "profiles");
+const PROFILE_FALLBACK_DIR = path.resolve(process.cwd(), "resources/profiles");
 const PROFILE_ROOT_DIRS = PROFILE_DIR_ENV
-  ? [PROFILE_DIR_ENV]
+  ? ["/data/profiles", PROFILE_DIR_ENV]
   : ["/data/profiles", PROFILE_FALLBACK_DIR];
 const HEADER_POLICY_DEFAULT = "prefer_request";
 const OUTPUT_RAW = "raw";
@@ -42,6 +43,7 @@ const STATIC_FILES = new Map([
 
 export {
   SUB_URL_DEFAULT,
+  AUTH_SESSION_TTL_SEC,
   CONVERTER_URL,
   SOURCE_URL,
   PORT,

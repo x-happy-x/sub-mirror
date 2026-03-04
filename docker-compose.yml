@@ -3,15 +3,16 @@ services:
     image: ghcr.io/x-happy-x/sub-mirror:latest
     ports:
       - "0.0.0.0:25500:8788"
-      - "0.0.0.0:25501:8787"
     volumes:
       - ./data:/data
-      - ./profiles:/profiles:ro
+      - ./resources/profiles:/profiles:ro
     environment:
       SUB_URL: ""
       USE_CONVERTER: "1"
+      AUTH_SESSION_TTL_SEC: "2592000"
       CONVERTER_URL: "http://127.0.0.1:8787/sub"
       SOURCE_URL: "http://127.0.0.1:8788/source.txt"
+      ADMIN_SEED_PATH: "/resources/admin.json"
       PROFILE_DIR: "/profiles"
       APP_PORT: "8788"
       SUBCONVERTER_PORT: "8787"

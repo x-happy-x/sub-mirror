@@ -1,12 +1,14 @@
 app: prizrak-box
-os: windows
+os: linux
 template: |
   ## [download] Установка приложения
-  Выберите архитектуру (предпочтительно установщик) и установите или распакуйте Prizrak-Box.
-  [button:Windows (Установщик)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/windows-amd64.msi)
-  [button:Windows на ARM (Установщик)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/windows-arm64.msi)
+  Выберите пакет под вашу архитектуру и установите Prizrak-Box.
+  [button:amd64 (.deb)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-amd64.deb)
+  [button:amd64 (.rpm)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-amd64.rpm)
+  [button:arm64 (.deb)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-arm64.deb)
+  [button:arm64 (.rpm)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-arm64.rpm)
   ## [danger] Предупреждение
-  Запустите программу от имени администратора.
+  Запустите программу.
   ## [add] Добавление подписки
   Нажмите кнопку ниже, чтобы автоматически добавить подписку.
   [button:Добавить подписку]({DEEPLINK})

@@ -1,10 +1,12 @@
 app: flclashx
-os: windows
+os: linux
 template: |
   ## [download] Установка приложения
   Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение.
-  [button:Windows (Установщик)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-windows-amd64-setup.exe)
-  [button:Windows на ARM (Установщик)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-windows-arm64-setup.exe)
+  [button:amd64 (.deb)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-amd64.deb)
+  [button:amd64 (AppImage)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-amd64.AppImage)
+  [button:amd64 (.rpm)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-amd64.rpm)
+  [button:arm64 (.deb)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-arm64.deb)
   ## [add] Добавление подписки
   Нажмите кнопку ниже, чтобы добавить подписку.
   [button:Добавить подписку]({DEEPLINK})

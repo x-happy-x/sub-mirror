@@ -1,14 +1,13 @@
 app: koala-clash
-os: linux
+os: macos
 template: |
   ## [download] Установка приложения
   Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение.
-  [button:amd64 (.deb)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash_amd64.deb)
-  [button:amd64 (.rpm)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash.x86_64.rpm)
-  [button:arm64 (.deb)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash_arm64.deb)
-  [button:arm64 (.rpm)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash.aarch64.rpm)
+  [button:macOS (Apple Silicon)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash_aarch64.dmg)
+  [button:macOS (Intel)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash_x64.dmg)
   ## [danger] Предупреждение
-  Если вы ранее использовали Clash Verge Rev, то его требуется удалить перед установкой Koala Clash.
+  Если вы ранее использовали Clash Verge Rev, то его требуется удалить перед установкой Koala Clash. 
+  ⚠️ Предупреждение: Если при запуске приложения на macOS появляется уведомление, что приложение повреждено, выполните эту команду в терминале: sudo xattr -r -c /Applications/Koala\ Clash.app
   ## [add] Добавление подписки
   Нажмите кнопку ниже, чтобы добавить подписку
   [button:Добавить подписку]({DEEPLINK})

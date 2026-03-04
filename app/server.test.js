@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   normalizeOutput,
   renderHomePage,
@@ -18,22 +19,20 @@ test("normalizeOutput supports aliases", () => {
   assert.equal(normalizeOutput("unknown"), null);
 });
 
-test("profiles are loaded from base and ua directories", () => {
+test("base profiles are loaded from profiles directory", () => {
   const base = readProfileFile("xiaomi");
   assert.ok(base);
   assert.equal(base.headers["x-device-os"], "Android");
-
-  const ua = readProfileFile("ua-flclashx-android");
-  assert.ok(ua);
-  assert.equal(ua.headers["user-agent"], "FlClash X/v0.3.2 Platform/android");
 });
 
 test("ua profile selection prefers app+device and falls back to ua-default", () => {
   const specific = pickUserAgentProfile("flclashx", "android");
-  assert.deepEqual(specific, { ok: true, profileName: "ua-flclashx-android" });
+  assert.equal(specific.ok, true);
+  assert.equal(specific.headers["user-agent"], "FlClash X/0.8.74 (Android 14)");
 
   const fallback = pickUserAgentProfile("unknown-app", "android");
-  assert.deepEqual(fallback, { ok: true, profileName: "ua-default" });
+  assert.equal(fallback.ok, true);
+  assert.equal(fallback.headers["user-agent"], "SubLab/UA Default (Windows)");
 });
 
 test("request config merges base and auto ua profiles with output alias", () => {
@@ -43,9 +42,19 @@ test("request config merges base and auto ua profiles with output alias", () => 
   const result = resolveRequestConfig(reqUrl, {});
   assert.equal(result.ok, true);
   assert.equal(result.output, "clash");
-  assert.deepEqual(result.profileNames, ["xiaomi", "ua-flclashx-android"]);
+  assert.deepEqual(result.profileNames, ["xiaomi"]);
   assert.equal(result.forwardHeaders["x-device-os"], "Android");
-  assert.equal(result.forwardHeaders["user-agent"], "FlClash X/v0.3.2 Platform/android");
+  assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.8.74 (Android 14)");
+});
+
+test("ua profile headers are locked and cannot be overridden by request headers", () => {
+  const reqUrl = new URL("http://localhost/last?app=flclashx&device=android&sub_url=https://example.com/sub");
+  const result = resolveRequestConfig(reqUrl, {
+    "user-agent": "BadUA/9.9.9",
+    "x-user-agent": "BadUA/9.9.9",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.8.74 (Android 14)");
 });
 
 test("produceOutput returns expected content types for raw and clash", async () => {
@@ -57,6 +66,23 @@ test("produceOutput returns expected content types for raw and clash", async () 
   const clashResult = await produceOutput(yamlInput, "clash");
   assert.equal(clashResult.ok, true);
   assert.equal(clashResult.contentType, "text/yaml; charset=utf-8");
+});
+
+test("produceOutput converts clash yaml fixture to raw URI list", async () => {
+  const fixturePath = new URL("./test-fixtures/subscription-yml-sample.yml", import.meta.url);
+  const yamlInput = fs.readFileSync(fixturePath, "utf8");
+  const rawResult = await produceOutput(yamlInput, "raw");
+
+  assert.equal(rawResult.ok, true);
+  assert.equal(rawResult.contentType, "text/plain; charset=utf-8");
+  assert.equal(typeof rawResult.body, "string");
+
+  const uriLines = rawResult.body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("vless://") || line.startsWith("vmess://") || line.startsWith("ss://") || line.startsWith("trojan://") || line.startsWith("ssr://"));
+
+  assert.ok(uriLines.length >= 4, "expected at least 4 raw URIs after yaml->raw conversion");
 });
 
 test("home page contains form, qr and app buttons", () => {

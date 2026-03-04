@@ -1,9 +1,9 @@
 app: happ
-os: windows
+os: linux
 template: |
   ## [download] Установка приложения
   Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение.
-  [button:Windows](https://github.com/Happ-proxy/happ-desktop/releases/latest/download/setup-Happ.x64.exe)
+  [button:Linux](https://github.com/Happ-proxy/happ-desktop/releases/latest/download/Happ.linux.x64.deb)
   ## [add] Добавление подписки
   Нажмите кнопку ниже — приложение откроется, и подписка добавится автоматически.
   [button:Добавить подписку]({DEEPLINK})

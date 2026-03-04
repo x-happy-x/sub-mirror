@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SUB_URL_DEFAULT,
   CONVERTER_URL,
@@ -18,6 +19,8 @@ import {
   CACHE_DIR,
   normalizeOutput,
 } from "./config.js";
+
+const UA_CATALOG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../resources/ua-catalog.json");
 
 function isHtml(s) {
   const t = s.trim().toLowerCase();
@@ -185,6 +188,218 @@ function convertVlessListToClash(text) {
   const proxies = lines.map(vlessToProxy);
   const yaml = `proxies:\n${buildYaml(proxies, 1)}`;
   return yaml;
+}
+
+function parseInlineYamlMap(body) {
+  const trimmed = String(body || "").trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return {};
+  const out = {};
+  for (const part of inner.split(",")) {
+    const idx = part.indexOf(":");
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    out[key] = unquoteYamlValue(value);
+  }
+  return out;
+}
+
+function normalizeYamlKey(key) {
+  const raw = String(key || "").trim();
+  if (!raw) return "";
+  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+    return raw.slice(1, -1).trim();
+  }
+  return raw;
+}
+
+function normalizeYamlScalarValue(value) {
+  const raw = String(value || "").trim();
+  return unquoteYamlValue(raw);
+}
+
+function parseClashProxyList(yamlText) {
+  const text = String(yamlText || "").replace(/\t/g, "  ");
+  const lines = text.split(/\r?\n/);
+  const proxies = [];
+  let inProxies = false;
+  let current = null;
+  let currentIndent = -1;
+
+  function pushCurrent() {
+    if (!current) return;
+    if (Object.keys(current).length > 0) proxies.push(current);
+    current = null;
+    currentIndent = -1;
+  }
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (!inProxies) {
+      if (/^proxies\s*:\s*$/i.test(trimmed)) inProxies = true;
+      continue;
+    }
+
+    const newTopLevel = rawLine.match(/^([A-Za-z0-9_.-]+)\s*:/);
+    if (newTopLevel && !rawLine.startsWith(" ") && !rawLine.startsWith("-")) {
+      pushCurrent();
+      break;
+    }
+
+    const item = rawLine.match(/^(\s*)-\s*(.*)$/);
+    if (item) {
+      pushCurrent();
+      current = {};
+      currentIndent = item[1].length;
+      const body = (item[2] || "").trim();
+      if (body) {
+        const inlineMap = parseInlineYamlMap(body);
+        if (inlineMap) {
+          Object.assign(current, inlineMap);
+        } else {
+          const pair = body.match(/^(['"]?[A-Za-z0-9_.-]+['"]?)\s*:\s*(.*)$/);
+          if (pair) current[normalizeYamlKey(pair[1])] = normalizeYamlScalarValue(pair[2] || "");
+        }
+      }
+      continue;
+    }
+
+    if (!current) continue;
+    const kv = rawLine.match(/^(\s*)(['"]?[A-Za-z0-9_.-]+['"]?)\s*:\s*(.*)$/);
+    if (!kv) continue;
+    const indent = kv[1].length;
+    if (indent <= currentIndent) continue;
+    current[normalizeYamlKey(kv[2])] = normalizeYamlScalarValue(kv[3] || "");
+  }
+
+  pushCurrent();
+  return proxies;
+}
+
+function buildRawUriFromProxy(proxy) {
+  const type = String(proxy.type || "").toLowerCase();
+  const name = encodeURIComponent(String(proxy.name || proxy.server || "proxy"));
+  const server = String(proxy.server || "").trim();
+  const port = Number(proxy.port || 0);
+  if (!server || !port) return "";
+
+  if (type === "ss") {
+    const cipher = String(proxy.cipher || "").trim();
+    const password = String(proxy.password || "").trim();
+    if (!cipher || !password) return "";
+    const userInfo = Buffer.from(`${cipher}:${password}`, "utf8").toString("base64");
+    return `ss://${userInfo}@${server}:${port}#${name}`;
+  }
+
+  if (type === "trojan") {
+    const password = String(proxy.password || "").trim();
+    if (!password) return "";
+    const params = new URLSearchParams();
+    if (proxy.sni || proxy.servername) params.set("sni", String(proxy.sni || proxy.servername));
+    if (proxy["skip-cert-verify"] === "true" || proxy["skip-cert-verify"] === true) {
+      params.set("allowInsecure", "1");
+    }
+    const query = params.toString();
+    return `trojan://${encodeURIComponent(password)}@${server}:${port}${query ? `?${query}` : ""}#${name}`;
+  }
+
+  if (type === "ssr") {
+    const protocol = String(proxy.protocol || "origin").trim();
+    const method = String(proxy.cipher || proxy.method || "").trim();
+    const obfs = String(proxy.obfs || "plain").trim();
+    const password = String(proxy.password || "").trim();
+    if (!method || !password) return "";
+    const pwd64 = Buffer.from(password, "utf8").toString("base64").replace(/=+$/g, "");
+    const protocolParam = String(proxy["protocol-param"] || proxy.protocolparam || "").trim();
+    const obfsParam = String(proxy["obfs-param"] || proxy.obfsparam || "").trim();
+    const remarks = decodeURIComponent(name);
+    const qs = new URLSearchParams();
+    if (obfsParam) qs.set("obfsparam", Buffer.from(obfsParam, "utf8").toString("base64").replace(/=+$/g, ""));
+    if (protocolParam) qs.set("protoparam", Buffer.from(protocolParam, "utf8").toString("base64").replace(/=+$/g, ""));
+    qs.set("remarks", Buffer.from(remarks, "utf8").toString("base64").replace(/=+$/g, ""));
+    const payload = `${server}:${port}:${protocol}:${method}:${obfs}:${pwd64}/?${qs.toString()}`;
+    return `ssr://${Buffer.from(payload, "utf8").toString("base64")}`;
+  }
+
+  if (type === "vless") {
+    const uuid = String(proxy.uuid || "").trim();
+    if (!uuid) return "";
+    const params = new URLSearchParams();
+    params.set("type", String(proxy.network || "tcp"));
+    params.set("security", proxy.tls === "true" || proxy.tls === true ? "tls" : "none");
+    if (proxy.servername || proxy.sni) params.set("sni", String(proxy.servername || proxy.sni));
+    return `vless://${uuid}@${server}:${port}?${params.toString()}#${name}`;
+  }
+
+  if (type === "vmess") {
+    const uuid = String(proxy.uuid || "").trim();
+    if (!uuid) return "";
+    const vmess = {
+      v: "2",
+      ps: decodeURIComponent(name),
+      add: server,
+      port: String(port),
+      id: uuid,
+      aid: String(proxy.alterId || proxy.alterid || 0),
+      net: String(proxy.network || "tcp"),
+      type: "none",
+      host: String(proxy.host || ""),
+      path: String(proxy.path || ""),
+      tls: proxy.tls === "true" || proxy.tls === true ? "tls" : "",
+      sni: String(proxy.servername || proxy.sni || ""),
+    };
+    const encoded = Buffer.from(JSON.stringify(vmess), "utf8").toString("base64");
+    return `vmess://${encoded}`;
+  }
+
+  return "";
+}
+
+function convertClashYamlToRawUris(yamlText) {
+  const text = String(yamlText || "");
+  const proxies = parseClashProxyList(text);
+  let lines = proxies.map(buildRawUriFromProxy).filter(Boolean);
+  if (lines.length > 0) return lines.join("\n");
+
+  const sectionMatch = text.match(/(?:^|\n)proxies\s*:\s*\n([\s\S]*)$/i);
+  const section = sectionMatch ? sectionMatch[1] : "";
+  if (!section) return "";
+  const blocks = section
+    .split(/\n(?=\s*-\s+name\s*:)/)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.startsWith("- name:"));
+
+  function getField(block, key) {
+    const re = new RegExp(`(?:^|\\n)\\s*${key}\\s*:\\s*(.+)$`, "m");
+    const m = block.match(re);
+    return m ? normalizeYamlScalarValue(m[1]) : "";
+  }
+
+  const regexProxies = blocks.map((block) => ({
+    name: normalizeYamlScalarValue(block.replace(/^-+\s*name\s*:\s*/i, "").split(/\n/)[0] || ""),
+    type: getField(block, "type"),
+    server: getField(block, "server"),
+    port: getField(block, "port"),
+    network: getField(block, "network"),
+    tls: getField(block, "tls"),
+    servername: getField(block, "servername"),
+    sni: getField(block, "sni"),
+    uuid: getField(block, "uuid"),
+    cipher: getField(block, "cipher"),
+    method: getField(block, "method"),
+    password: getField(block, "password"),
+    obfs: getField(block, "obfs"),
+    protocol: getField(block, "protocol"),
+    "protocol-param": getField(block, "protocol-param"),
+    "obfs-param": getField(block, "obfs-param"),
+  }));
+
+  lines = regexProxies.map(buildRawUriFromProxy).filter(Boolean);
+  return lines.join("\n");
 }
 
 function writeStatus(obj) {
@@ -363,10 +578,10 @@ function parseProfileYaml(content) {
 }
 
 function profileSearchDirs(profileName) {
-  const isUaProfile = String(profileName || "").startsWith("ua-");
   const dirs = [];
   for (const root of PROFILE_ROOT_DIRS) {
-    dirs.push(path.join(root, isUaProfile ? "ua" : "base"));
+    dirs.push(path.join(root, "profiles"));
+    dirs.push(path.join(root, "base"));
     dirs.push(root);
   }
   return dirs.filter((dir, i, arr) => arr.indexOf(dir) === i);
@@ -400,6 +615,54 @@ function sanitizeProfileToken(value) {
   return token;
 }
 
+function defaultUaCatalog() {
+  return {
+    __default__: "SubLab/UA Default (Windows)",
+    windows: {
+      flclashx: "FlClash X/0.8.74 (Windows 11; Win64; x64)",
+      happ: "Happ/1.2.0 (Windows 11; Win64; x64)",
+    },
+  };
+}
+
+function readUaCatalog() {
+  try {
+    if (!fs.existsSync(UA_CATALOG_PATH)) return defaultUaCatalog();
+    const parsed = JSON.parse(fs.readFileSync(UA_CATALOG_PATH, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return defaultUaCatalog();
+    }
+    return parsed;
+  } catch {
+    return defaultUaCatalog();
+  }
+}
+
+function getUaCatalogOptions() {
+  const raw = readUaCatalog();
+  const options = {};
+  for (const [osKey, apps] of Object.entries(raw)) {
+    if (osKey === "__default__") continue;
+    if (!apps || typeof apps !== "object" || Array.isArray(apps)) continue;
+    const appMap = {};
+    for (const [appKey, ua] of Object.entries(apps)) {
+      const safeApp = sanitizeProfileToken(appKey);
+      if (!safeApp) continue;
+      const text = String(ua || "").trim();
+      if (!text) continue;
+      appMap[safeApp] = text;
+    }
+    if (Object.keys(appMap).length > 0) {
+      const safeOs = sanitizeProfileToken(osKey);
+      if (safeOs) options[safeOs] = appMap;
+    }
+  }
+  const defaultUa = typeof raw.__default__ === "string" && raw.__default__.trim()
+    ? raw.__default__.trim()
+    : "";
+  return { options, defaultUa };
+}
+
 function pickProfileNames(reqUrl, reqHeaders, forcedProfileName = "") {
   const rawNames = [
     ...reqUrl.searchParams.getAll("profile"),
@@ -423,31 +686,45 @@ function pickProfileNames(reqUrl, reqHeaders, forcedProfileName = "") {
 }
 
 function pickUserAgentProfile(app, device) {
+  const { options, defaultUa } = getUaCatalogOptions();
   const appToken = sanitizeProfileToken(app);
   const deviceToken = sanitizeProfileToken(device);
   if (!appToken && !deviceToken) {
-    return profileExists("ua-default")
-      ? { ok: true, profileName: "ua-default" }
-      : { ok: true, profileName: "" };
+    return defaultUa
+      ? { ok: true, headers: { "user-agent": defaultUa }, source: "default" }
+      : { ok: true, headers: {}, source: "" };
   }
   if (!appToken && deviceToken) {
     return { ok: false, error: "app is required when device is provided" };
   }
 
-  const candidates = [];
-  if (appToken && deviceToken) candidates.push(`ua-${appToken}-${deviceToken}`);
-  if (appToken) candidates.push(`ua-${appToken}`);
-  candidates.push("ua-default");
-
-  for (const candidate of candidates) {
-    if (profileExists(candidate)) {
-      return { ok: true, profileName: candidate };
+  if (deviceToken) {
+    const perOs = options[deviceToken];
+    if (perOs && perOs[appToken]) {
+      return {
+        ok: true,
+        headers: { "user-agent": perOs[appToken] },
+        source: `${deviceToken}:${appToken}`,
+      };
     }
   }
-  return {
-    ok: false,
-    error: `user-agent profile not found for app=${appToken}${deviceToken ? ` device=${deviceToken}` : ""}`,
-  };
+
+  if (!deviceToken) {
+    for (const [osKey, appMap] of Object.entries(options)) {
+      if (appMap && appMap[appToken]) {
+        return {
+          ok: true,
+          headers: { "user-agent": appMap[appToken] },
+          source: `${osKey}:${appToken}`,
+        };
+      }
+    }
+  }
+
+  if (defaultUa) {
+    return { ok: true, headers: { "user-agent": defaultUa }, source: "default" };
+  }
+  return { ok: true, headers: {}, source: "" };
 }
 
 function mergeProfiles(profileNames) {
@@ -458,6 +735,7 @@ function mergeProfiles(profileNames) {
     allowHwidOverride: true,
     headers: {},
     requiredHeaders: [],
+    lockedHeaders: {},
   };
   for (const name of profileNames) {
     const profile = readProfileFile(name);
@@ -469,6 +747,13 @@ function mergeProfiles(profileNames) {
     if (profile.headerPolicy) merged.headerPolicy = profile.headerPolicy;
     merged.allowHwidOverride = profile.allowHwidOverride !== false;
     merged.headers = { ...merged.headers, ...profile.headers };
+    if (name.startsWith("ua-")) {
+      for (const [k, v] of Object.entries(profile.headers || {})) {
+        if (v !== undefined && v !== null && v !== "") {
+          merged.lockedHeaders[k] = String(v);
+        }
+      }
+    }
     for (const key of profile.requiredHeaders) {
       if (!merged.requiredHeaders.includes(key)) merged.requiredHeaders.push(key);
     }
@@ -480,11 +765,24 @@ function mergeProfiles(profileNames) {
   return { ok: true, profile: merged };
 }
 
-function resolveForwardHeaders(reqHeaders, profile, hwidOverride) {
+function resolveForwardHeaders(reqHeaders, profile, hwidFromQuery, hwidFromHeader) {
   const incoming = sanitizeForwardHeaders(reqHeaders);
   const fromProfile = { ...profile.headers };
-  if (hwidOverride && profile.allowHwidOverride !== false) {
-    fromProfile["x-hwid"] = hwidOverride;
+  const lockedHeaders = profile.lockedHeaders && typeof profile.lockedHeaders === "object"
+    ? profile.lockedHeaders
+    : {};
+
+  // Query hwid (UI override) always wins.
+  if (hwidFromQuery) {
+    fromProfile["x-hwid"] = hwidFromQuery;
+  } else if (hwidFromHeader && profile.allowHwidOverride !== false) {
+    // Client-provided x-hwid can override only when profile allows it.
+    fromProfile["x-hwid"] = hwidFromHeader;
+  }
+
+  // When override is disabled in profile, ignore client x-hwid header.
+  if (profile.allowHwidOverride === false) {
+    delete incoming["x-hwid"];
   }
 
   if (profile.headerPolicy === "require_request") {
@@ -495,10 +793,17 @@ function resolveForwardHeaders(reqHeaders, profile, hwidOverride) {
     }
   }
 
-  if (profile.headerPolicy === "file_only") {
-    return { ok: true, headers: { ...incoming, ...fromProfile } };
+  const merged =
+    profile.headerPolicy === "file_only"
+      ? { ...incoming, ...fromProfile }
+      : { ...fromProfile, ...incoming };
+  for (const [k, v] of Object.entries(lockedHeaders)) {
+    merged[k] = v;
   }
-  return { ok: true, headers: { ...fromProfile, ...incoming } };
+  if (hwidFromQuery) {
+    merged["x-hwid"] = hwidFromQuery;
+  }
+  return { ok: true, headers: merged };
 }
 
 function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
@@ -513,13 +818,14 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
   if (!uaProfile.ok) {
     return { ok: false, status: 400, error: uaProfile.error };
   }
-  if (uaProfile.profileName && !profileNames.includes(uaProfile.profileName)) {
-    profileNames.push(uaProfile.profileName);
-  }
 
   const merged = mergeProfiles(profileNames);
   if (!merged.ok) {
     return { ok: false, status: 400, error: merged.error };
+  }
+  if (uaProfile.headers && uaProfile.headers["user-agent"]) {
+    merged.profile.headers["user-agent"] = uaProfile.headers["user-agent"];
+    merged.profile.lockedHeaders["user-agent"] = uaProfile.headers["user-agent"];
   }
 
   const subFromQuery = reqUrl.searchParams.get("sub_url");
@@ -544,9 +850,9 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
         : OUTPUT_RAW
       : merged.profile.output || OUTPUT_DEFAULT);
 
-  const hwidOverride =
-    reqUrl.searchParams.get("hwid") ?? firstHeaderValue(reqHeaders["x-hwid"]);
-  const resolvedHeaders = resolveForwardHeaders(reqHeaders, merged.profile, hwidOverride);
+  const hwidFromQuery = String(reqUrl.searchParams.get("hwid") || "").trim();
+  const hwidFromHeader = String(firstHeaderValue(reqHeaders["x-hwid"]) || "").trim();
+  const resolvedHeaders = resolveForwardHeaders(reqHeaders, merged.profile, hwidFromQuery, hwidFromHeader);
   if (!resolvedHeaders.ok) {
     return { ok: false, status: 400, error: resolvedHeaders.error };
   }
@@ -586,21 +892,38 @@ function sanitizeUpstreamResponseHeaders(headers) {
   return out;
 }
 
+async function callSubconverter(target, listMode) {
+  const finalUrl = `${CONVERTER_URL}?target=${encodeURIComponent(target)}&url=${encodeURIComponent(
+    SOURCE_URL,
+  )}&list=${listMode ? "true" : "false"}`;
+  const res = await fetch(finalUrl);
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`subconverter ${res.status}: ${text.slice(0, 180)}`);
+  }
+  return text;
+}
+
 async function convertViaSubconverter(rawText) {
   if (!CONVERTER_URL) {
     throw new Error("CONVERTER_URL is not set");
   }
   fs.writeFileSync(SOURCE_PATH, rawText);
-
-  const target = "clash";
-  const finalUrl = `${CONVERTER_URL}?target=${encodeURIComponent(target)}&url=${encodeURIComponent(
-    SOURCE_URL,
-  )}&list=true`;
-
-  const res = await fetch(finalUrl);
-  const text = await res.text();
+  const text = await callSubconverter("clash", true);
   fs.writeFileSync(OUT_CONVERTED, text);
   return text;
+}
+
+async function convertViaSubconverterToRaw(rawText) {
+  if (!CONVERTER_URL) {
+    throw new Error("CONVERTER_URL is not set");
+  }
+  fs.writeFileSync(SOURCE_PATH, rawText);
+  try {
+    return await callSubconverter("mixed", false);
+  } catch {
+    return await callSubconverter("mixed", true);
+  }
 }
 
 async function fetchWithNode(subUrl, forwardHeaders) {
@@ -624,13 +947,42 @@ async function produceOutput(rawText, output) {
   }
 
   if (output === OUTPUT_RAW) {
-    if (!hasAnySubscriptions(rawText)) {
+    let out = rawText;
+    let conversion = "none-raw";
+
+    if (looksLikeClashProviderYaml(rawText)) {
+      try {
+        let converted = await convertViaSubconverterToRaw(rawText);
+        if (looksLikeUriListOrBase64(converted)) {
+          converted = decodeBase64IfNeeded(converted);
+        }
+        if (hasAnySubscriptions(converted) && !looksLikeClashProviderYaml(converted)) {
+          out = converted;
+          conversion = "subconverter-raw";
+        } else {
+          const fallback = convertClashYamlToRawUris(rawText);
+          if (hasAnySubscriptions(fallback) && !looksLikeClashProviderYaml(fallback)) {
+            out = fallback;
+            conversion = "yaml-fallback-raw";
+          } else {
+            return { ok: false, error: "failed to convert yaml to raw" };
+          }
+        }
+      } catch (e) {
+        const fallback = convertClashYamlToRawUris(rawText);
+        if (hasAnySubscriptions(fallback) && !looksLikeClashProviderYaml(fallback)) {
+          out = fallback;
+          conversion = "yaml-fallback-raw";
+        } else {
+          return { ok: false, error: `failed to convert yaml to raw: ${e?.message || e}` };
+        }
+      }
+    }
+
+    if (!hasAnySubscriptions(out)) {
       return { ok: false, error: "no subscriptions" };
     }
-    const contentType = looksLikeClashProviderYaml(rawText)
-      ? "text/yaml; charset=utf-8"
-      : "text/plain; charset=utf-8";
-    return { ok: true, body: rawText, contentType, conversion: "none-raw" };
+    return { ok: true, body: out, contentType: "text/plain; charset=utf-8", conversion };
   }
 
   if (output !== OUTPUT_CLASH) {
@@ -1064,11 +1416,13 @@ async function handleEcho(req, res) {
 
 export {
   parseProfileYaml,
+  getUaCatalogOptions,
   readProfileFile,
   profileExists,
   pickUserAgentProfile,
   resolveRequestConfig,
   produceOutput,
+  fetchWithNode,
   handleSubscription,
   handleLast,
   handleEcho,

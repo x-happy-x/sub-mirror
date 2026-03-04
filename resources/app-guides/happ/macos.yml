@@ -1,8 +1,8 @@
 app: happ
-os: ios
+os: macos
 template: |
   ## [download] Установка приложения
-  Откройте страницу в App Store и установите приложение. Запустите его, в окне разрешения VPN-конфигурации нажмите Allow и введите свой пароль.
+  Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение.
   [button:App Store (RU)](https://apps.apple.com/ru/app/happ-proxy-utility-plus/id6746188973)
   [button:App Store (Global)](https://apps.apple.com/us/app/happ-proxy-utility/id6504287215)
   ## [add] Добавление подписки

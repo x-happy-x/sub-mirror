@@ -1,8 +1,8 @@
 {
   "users": [
     {
-      "username": "amagomedsharipov",
-      "password": "PasswordForSL05",
+      "username": "admin",
+      "password": "admin",
       "role": "admin"
     }
   ]

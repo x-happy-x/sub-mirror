@@ -1,9 +1,12 @@
 app: koala-clash
-os: windows
+os: linux
 template: |
   ## [download] Установка приложения
   Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение.
-  [button:Windows (Установщик)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-windows-amd64-setup.exe)
+  [button:amd64 (.deb)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash_amd64.deb)
+  [button:amd64 (.rpm)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash.x86_64.rpm)
+  [button:arm64 (.deb)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash_arm64.deb)
+  [button:arm64 (.rpm)](https://github.com/coolcoala/clash-verge-rev-lite/releases/latest/download/Koala.Clash.aarch64.rpm)
   ## [danger] Предупреждение
   Если вы ранее использовали Clash Verge Rev, то его требуется удалить перед установкой Koala Clash.
   ## [add] Добавление подписки

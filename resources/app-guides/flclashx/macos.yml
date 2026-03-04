@@ -1,14 +1,12 @@
 app: flclashx
-os: linux
+os: macos
 template: |
   ## [download] Установка приложения
   Выберите подходящую версию для вашего устройства, нажмите на кнопку ниже и установите приложение.
-  [button:amd64 (.deb)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-amd64.deb)
-  [button:amd64 (AppImage)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-amd64.AppImage)
-  [button:amd64 (.rpm)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-amd64.rpm)
-  [button:arm64 (.deb)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-linux-arm64.deb)
+  [button:macOS (Apple Silicon)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-macos-arm64.dmg)
+  [button:macOS (Intel)](https://github.com/pluralplay/FlClashX/releases/latest/download/FlClashX-macos-amd64.dmg)
   ## [add] Добавление подписки
-  Нажмите кнопку ниже, чтобы добавить подписку.
+  Нажмите кнопку ниже, чтобы добавить подписку
   [button:Добавить подписку]({DEEPLINK})
   ## [warning] Если подписка не добавилась
   Если после нажатия на кнопку ничего не произошло, добавьте подписку вручную.

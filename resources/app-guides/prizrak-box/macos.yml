@@ -1,14 +1,13 @@
 app: prizrak-box
-os: linux
+os: macos
 template: |
   ## [download] Установка приложения
-  Выберите пакет под вашу архитектуру и установите Prizrak-Box.
-  [button:amd64 (.deb)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-amd64.deb)
-  [button:amd64 (.rpm)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-amd64.rpm)
-  [button:arm64 (.deb)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-arm64.deb)
-  [button:arm64 (.rpm)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/linux-arm64.rpm)
+  Скачайте архив под ваш чип (Apple Silicon или Intel), распакуйте и переместите Prizrak-Box.app в Applications.
+  [button:macOS (Apple Silicon)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/macos-arm64-dmg.zip)
+  [button:macOS (Intel)](https://github.com/legiz-ru/Prizrak-Box/releases/latest/download/macos-amd64-dmg.zip)
   ## [danger] Предупреждение
-  Запустите программу.
+  Если macOS показывает предупреждения безопасности — следуйте инструкции.
+  [button:Инструкция для Mac](https://github.com/legiz-ru/Prizrak-Box/blob/v3/doc/mac/mac.md)
   ## [add] Добавление подписки
   Нажмите кнопку ниже, чтобы автоматически добавить подписку.
   [button:Добавить подписку]({DEEPLINK})
