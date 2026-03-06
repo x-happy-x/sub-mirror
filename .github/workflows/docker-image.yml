@@ -89,12 +89,18 @@ jobs:
             cd "${REMOTE_DIR}"
 
             if [ ! -d .git ]; then
-              git clone "${REPO_URL}" .
+              if [ -n "$(ls -A . 2>/dev/null)" ]; then
+                git init
+                git remote add origin "${REPO_URL}" || git remote set-url origin "${REPO_URL}"
+              else
+                git clone "${REPO_URL}" .
+              fi
             fi
 
-            git fetch --all --prune
-            git checkout "${{ github.ref_name }}"
+            git fetch origin --prune
+            git checkout -B "${{ github.ref_name }}" "origin/${{ github.ref_name }}"
             git reset --hard "${{ github.sha }}"
+            git clean -fd
 
             docker login ghcr.io -u "${{ secrets.GHCR_USER }}" -p "${{ secrets.GHCR_TOKEN }}"
             docker compose pull
