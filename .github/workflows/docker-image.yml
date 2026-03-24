@@ -81,17 +81,51 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            set -euo pipefail
+            set -Eeuo pipefail
             REMOTE_DIR="${{ secrets.REMOTE_DIR }}"
-            REPO_URL="https://github.com/${{ github.repository }}.git"
+            REPO_URL="https://github.com/x-happy-x/sub-lab.git"
             DEPLOY_USER="$(id -un)"
             DEPLOY_GROUP="$(id -gn)"
+            FAILED_COMMAND=""
+            COMPOSE_FILE=""
 
+            on_error() {
+              exit_code=$?
+              echo "[ERR] deploy failed with exit code ${exit_code} at line ${1}: ${FAILED_COMMAND}" >&2
+              echo "[ERR] pwd: $(pwd)" >&2
+              echo "[ERR] whoami: $(id -un)" >&2
+              echo "[ERR] docker version:" >&2
+              docker --version >&2 || true
+              echo "[ERR] docker compose version:" >&2
+              docker compose version >&2 || true
+              if [ -n "${COMPOSE_FILE}" ]; then
+                echo "[ERR] docker compose ps:" >&2
+                docker compose -f "${COMPOSE_FILE}" ps >&2 || true
+                echo "[ERR] docker compose logs --tail 200:" >&2
+                docker compose -f "${COMPOSE_FILE}" logs --tail 200 >&2 || true
+              else
+                echo "[ERR] docker compose ps:" >&2
+                docker compose ps >&2 || true
+                echo "[ERR] docker compose logs --tail 200:" >&2
+                docker compose logs --tail 200 >&2 || true
+              fi
+              exit "${exit_code}"
+            }
+
+            trap 'on_error $LINENO' ERR
+            trap 'FAILED_COMMAND=$BASH_COMMAND' DEBUG
+
+            log_step() {
+              echo "[DEPLOY] $*"
+            }
+
+            log_step "ensure remote directory exists: ${REMOTE_DIR}"
             mkdir -p "${REMOTE_DIR}"
 
             # Try to fix ownership when directory was created by another user (for example root).
             if [ ! -w "${REMOTE_DIR}" ] || { [ -e "${REMOTE_DIR}/.git" ] && [ ! -r "${REMOTE_DIR}/.git" ]; }; then
               if command -v sudo >/dev/null 2>&1; then
+                log_step "attempt chown for ${REMOTE_DIR}"
                 sudo chown -R "${DEPLOY_USER}:${DEPLOY_GROUP}" "${REMOTE_DIR}" || true
               fi
             fi
@@ -102,27 +136,37 @@ jobs:
               exit 1
             fi
 
+            log_step "enter remote directory"
             cd "${REMOTE_DIR}"
+            log_step "mark git safe.directory"
             git config --global --add safe.directory "${REMOTE_DIR}"
 
             if [ ! -d .git ]; then
               if [ -n "$(ls -A . 2>/dev/null)" ]; then
+                log_step "initialize git repository in existing non-empty directory"
                 git init
                 git remote add origin "${REPO_URL}" || git remote set-url origin "${REPO_URL}"
               else
+                log_step "clone repository ${REPO_URL}"
                 git clone "${REPO_URL}" .
               fi
             fi
 
+            log_step "sync git state from origin"
             git fetch origin --prune
             git checkout -B "${{ github.ref_name }}" "origin/${{ github.ref_name }}"
             git reset --hard "${{ github.sha }}"
             git clean -fd
 
+            COMPOSE_FILE="docker-compose.yml"
+            log_step "login to ghcr.io"
             docker login ghcr.io -u "${{ secrets.GHCR_USER }}" -p "${{ secrets.GHCR_TOKEN }}"
+            log_step "pull docker images"
             docker compose pull
+            log_step "start docker compose stack"
             docker compose up -d
 
+            log_step "wait for health endpoint http://127.0.0.1:25500/health"
             for i in $(seq 1 60); do
               if curl -fsS http://127.0.0.1:25500/health >/dev/null 2>&1; then
                 echo "[OK] health endpoint is up"
