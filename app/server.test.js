@@ -99,6 +99,34 @@ test("produceOutput wraps clash output for flclashx into full config", async () 
   assert.match(clashResult.body, /MATCH,PROXY/);
 });
 
+test("produceOutput does not double-wrap full clash config for flclashx", async () => {
+  const yamlInput = [
+    "mixed-port: 7890",
+    "allow-lan: true",
+    "mode: rule",
+    "proxies:",
+    "  - name: Alpha",
+    "    type: ss",
+    "    server: 1.1.1.1",
+    "    port: 443",
+    "    cipher: aes-128-gcm",
+    "    password: secret",
+    "proxy-groups:",
+    "  - name: PROXY",
+    "    type: select",
+    "    proxies:",
+    "      - Alpha",
+    "rules:",
+    "  - MATCH,PROXY",
+  ].join("\n");
+  const clashResult = await produceOutput(yamlInput, "clash", { app: "flclashx" });
+
+  assert.equal(clashResult.ok, true);
+  assert.equal(clashResult.body, yamlInput);
+  assert.equal((clashResult.body.match(/^proxy-groups:\s*$/gm) || []).length, 1);
+  assert.equal((clashResult.body.match(/^rules:\s*$/gm) || []).length, 1);
+});
+
 test("parseServersFromText reads multiline clash proxy items", () => {
   const yamlInput = [
     "proxies:",

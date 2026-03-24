@@ -33,6 +33,18 @@ function looksLikeClashProviderYaml(s) {
   return /^\s*proxies\s*:\s*$/m.test(s);
 }
 
+function looksLikeFullClashConfig(s) {
+  const text = String(s || "");
+  return /^(?:mixed-port|port|socks-port|redir-port|tproxy-port|allow-lan|mode|log-level|external-controller|secret|dns|proxy-groups|rules|rule-providers|proxy-providers)\s*:/m.test(
+    text,
+  );
+}
+
+function shouldWrapClashProviderForFlClash(s) {
+  const text = String(s || "").trim();
+  return looksLikeClashProviderYaml(text) && !looksLikeFullClashConfig(text);
+}
+
 function looksLikeUriListOrBase64(s) {
   const t = s.trim();
   return (
@@ -285,7 +297,7 @@ function convertVlessListToClash(text) {
 
 function wrapClashProviderForFlClash(yamlText) {
   const text = String(yamlText || "").trim();
-  if (!looksLikeClashProviderYaml(text)) return text;
+  if (!shouldWrapClashProviderForFlClash(text)) return text;
 
   const proxyNames = parseClashProxyList(text)
     .map((proxy) => sanitizeNodeName(proxy?.name, "proxy"))
@@ -1194,8 +1206,11 @@ async function produceOutput(rawText, output, options = {}) {
     return { ok: false, error: "no subscriptions" };
   }
   if (appToken === "flclashx") {
-    out = wrapClashProviderForFlClash(out);
-    conversion = conversion === "none" ? "flclashx-wrap" : `${conversion}+flclashx-wrap`;
+    const wrapped = wrapClashProviderForFlClash(out);
+    if (wrapped !== out) {
+      out = wrapped;
+      conversion = conversion === "none" ? "flclashx-wrap" : `${conversion}+flclashx-wrap`;
+    }
   }
   return { ok: true, body: out, contentType: "text/yaml; charset=utf-8", conversion };
 }
