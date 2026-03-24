@@ -795,6 +795,8 @@ function renderHomePage() {
             <select id="subTestOutput">
               <option value="yml">yml / clash</option>
               <option value="raw">raw</option>
+              <option value="raw_base64">raw (base64)</option>
+              <option value="json">json</option>
             </select>
           </div>
           <div>
@@ -853,6 +855,11 @@ function renderHomePage() {
                   <rect x="4" y="4" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>
                 </svg>
               </button>
+              <button id="subTestDownloadSourceBody" class="btn icon-btn" type="button" title="Скачать исходный ответ" aria-label="Скачать исходный ответ">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 4v10m0 0 4-4m-4 4-4-4M5 18h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
             </label>
             <select id="subTestSourceServers"></select>
           </div>
@@ -863,6 +870,11 @@ function renderHomePage() {
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                   <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>
                   <rect x="4" y="4" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>
+                </svg>
+              </button>
+              <button id="subTestDownloadConvertedBody" class="btn icon-btn" type="button" title="Скачать результат конвертации" aria-label="Скачать результат конвертации">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 4v10m0 0 4-4m-4 4-4-4M5 18h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
             </label>
@@ -994,6 +1006,8 @@ function renderHomePage() {
     const subTestConvertedServersEl = qs("subTestConvertedServers");
     const subTestCopySourceBodyEl = qs("subTestCopySourceBody");
     const subTestCopyConvertedBodyEl = qs("subTestCopyConvertedBody");
+    const subTestDownloadSourceBodyEl = qs("subTestDownloadSourceBody");
+    const subTestDownloadConvertedBodyEl = qs("subTestDownloadConvertedBody");
     const subTestRequestResultEl = qs("subTestRequestResult");
     const subTestHeadersResultEl = qs("subTestHeadersResult");
     const subTestCacheResultEl = qs("subTestCacheResult");
@@ -1593,6 +1607,25 @@ function renderHomePage() {
       withStatus(ok ? "Скопировано" : "Не удалось скопировать", ok ? "ok" : "error");
     }
 
+    function extensionForFormat(format) {
+      const token = String(format || "").trim().toLowerCase();
+      if (token.startsWith("json")) return "json";
+      if (token === "yaml" || token.startsWith("yml")) return "yaml";
+      return "txt";
+    }
+
+    function downloadTextFile(body, fileName) {
+      const blob = new Blob([String(body || "")], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
     function labelsFromPayload(payload) {
       const labels = [];
       labels.push((payload.output || "yml").toLowerCase());
@@ -2081,6 +2114,26 @@ function renderHomePage() {
         }
         const ok = await writeClipboard(subTestLastConvertedBody);
         withSubTestStatus(ok ? "Результат конвертации скопирован" : "Не удалось скопировать результат конвертации", ok ? "ok" : "error");
+      });
+    }
+    if (subTestDownloadSourceBodyEl) {
+      subTestDownloadSourceBodyEl.addEventListener("click", () => {
+        if (!subTestLastSourceBody) {
+          withSubTestStatus("Нет исходного ответа для скачивания", "warn");
+          return;
+        }
+        downloadTextFile(subTestLastSourceBody, "source." + extensionForFormat(subTestSourceFormatEl.textContent || ""));
+        withSubTestStatus("Исходный ответ скачан", "ok");
+      });
+    }
+    if (subTestDownloadConvertedBodyEl) {
+      subTestDownloadConvertedBodyEl.addEventListener("click", () => {
+        if (!subTestLastConvertedBody) {
+          withSubTestStatus("Нет результата конвертации для скачивания", "warn");
+          return;
+        }
+        downloadTextFile(subTestLastConvertedBody, "converted." + extensionForFormat(subTestConvertedFormatEl.textContent || ""));
+        withSubTestStatus("Результат конвертации скачан", "ok");
       });
     }
     on("subTestSavedRefresh", "click", refreshSavedSubTestList);

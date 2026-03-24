@@ -157,6 +157,25 @@ function normalizePublicBaseUrl(raw: string): string {
   }
 }
 
+function detectDownloadExtension(format: string): string {
+  const token = String(format || "").trim().toLowerCase();
+  if (token.startsWith("json")) return "json";
+  if (token === "yaml" || token.startsWith("yml")) return "yaml";
+  return "txt";
+}
+
+function downloadTextFile(body: string, fileName: string) {
+  const blob = new Blob([String(body || "")], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 type ProfileHeaderRow = {
   id: string;
   key: string;
@@ -1548,12 +1567,26 @@ export default function App() {
             <div className="result">
               <strong>Источник: {testResult?.upstream?.sourceFormat || "-"}</strong>
               <select>{sourceServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
-              <TipIconButton tip="Копировать исходный ответ" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.upstream?.body || "")} />
+              <div className="toolbar">
+                <TipIconButton tip="Копировать исходный ответ" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.upstream?.body || "")} />
+                <TipIconButton
+                  tip="Скачать исходный ответ"
+                  icon={<SaveIcon className="btn-icon" />}
+                  onClick={() => downloadTextFile(testResult?.upstream?.body || "", `source.${detectDownloadExtension(testResult?.upstream?.sourceFormat || "")}`)}
+                />
+              </div>
             </div>
             <div className="result">
               <strong>После конвертации: {testResult?.conversion?.outputFormat || "-"}</strong>
               <select>{convertedServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
-              <TipIconButton tip="Копировать результат конвертации" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.conversion?.body || "")} />
+              <div className="toolbar">
+                <TipIconButton tip="Копировать результат конвертации" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.conversion?.body || "")} />
+                <TipIconButton
+                  tip="Скачать результат конвертации"
+                  icon={<SaveIcon className="btn-icon" />}
+                  onClick={() => downloadTextFile(testResult?.conversion?.body || "", `converted.${detectDownloadExtension(testResult?.conversion?.outputFormat || "")}`)}
+                />
+              </div>
             </div>
           </div>
           <pre className="json">{JSON.stringify(testResult, null, 2)}</pre>

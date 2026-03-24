@@ -304,43 +304,119 @@ function detectSourceFormat(rawText, contentType = "") {
   return "unknown";
 }
 
-function parseServersFromText(rawText) {
-  const text = String(rawText || "");
-  if (!text.trim()) return [];
+function decodeUriTitle(uri) {
+  const item = String(uri || "").trim();
+  if (!/^(vmess|vless|ss|ssr|trojan):\/\//.test(item)) return "";
+  let title = "";
+  try {
+    const hashIndex = item.indexOf("#");
+    if (hashIndex >= 0) {
+      title = decodeURIComponent(item.slice(hashIndex + 1));
+    }
+  } catch {
+    title = "";
+  }
+  return title || item.slice(0, 80);
+}
+
+function parseYamlProxyNames(text) {
+  const lines = String(text || "").split(/\r?\n/);
   const out = [];
-  const format = detectSourceFormat(text);
-  if (format === "yml") {
-    const lines = text.split(/\r?\n/);
-    for (const line of lines) {
-      const match = line.match(/^\s*-\s*name\s*:\s*(.+)\s*$/);
-      if (!match) continue;
-      let name = match[1].trim();
-      if ((name.startsWith("\"") && name.endsWith("\"")) || (name.startsWith("'") && name.endsWith("'"))) {
-        name = name.slice(1, -1);
-      }
-      if (!name) continue;
-      if (!out.includes(name)) out.push(name);
+  const seen = new Set();
+  let inProxies = false;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    if (!inProxies) {
+      if (/^proxies\s*:\s*$/i.test(trimmed)) inProxies = true;
+      continue;
     }
-    return out;
+
+    const newTopLevel = rawLine.match(/^([A-Za-z0-9_.-]+)\s*:/);
+    if (newTopLevel && !rawLine.startsWith(" ") && !rawLine.startsWith("-")) break;
+
+    const match = rawLine.match(/^\s*-\s*name\s*:\s*(.+)\s*$/);
+    if (!match) continue;
+    let name = String(match[1] || "").trim();
+    if ((name.startsWith("\"") && name.endsWith("\"")) || (name.startsWith("'") && name.endsWith("'"))) {
+      name = name.slice(1, -1);
+    }
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
   }
-  const decoded = decodeBase64IfNeeded(text);
-  for (const line of decoded.split(/\r?\n/)) {
-    const item = line.trim();
-    if (!/^(vmess|vless|ss|ssr|trojan):\/\//.test(item)) continue;
-    let title = "";
-    try {
-      const hashIndex = item.indexOf("#");
-      if (hashIndex >= 0) {
-        title = decodeURIComponent(item.slice(hashIndex + 1));
+
+  return out;
+}
+
+function parseJsonServerEntries(text) {
+  const out = [];
+  const seen = new Set();
+  const pushEntry = (name, uri = "") => {
+    const safeName = String(name || "").trim();
+    const safeUri = String(uri || "").trim();
+    if (!safeName) return;
+    const key = `${safeName}|${safeUri}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ name: safeName, uri: safeUri });
+  };
+
+  function visit(node, parentName = "") {
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, parentName);
+      return;
+    }
+    if (!node || typeof node !== "object") {
+      if (typeof node === "string" && /^(vmess|vless|ss|ssr|trojan):\/\//.test(node.trim())) {
+        pushEntry(decodeUriTitle(node), node);
       }
-    } catch {
-      title = "";
+      return;
     }
-    if (!title) {
-      title = item.slice(0, 80);
+
+    if (typeof node.uri === "string" && /^(vmess|vless|ss|ssr|trojan):\/\//.test(node.uri.trim())) {
+      pushEntry(node.name || decodeUriTitle(node.uri), node.uri);
     }
-    if (!out.includes(title)) out.push(title);
+    if (typeof node.url === "string" && /^(vmess|vless|ss|ssr|trojan):\/\//.test(node.url.trim())) {
+      pushEntry(node.name || decodeUriTitle(node.url), node.url);
+    }
+    if (typeof node.name === "string" && !Array.isArray(node.proxies) && !Array.isArray(node.outbounds)) {
+      pushEntry(node.name, "");
+    }
+
+    if (Array.isArray(node.proxies)) {
+      for (const proxy of node.proxies) {
+        if (proxy && typeof proxy === "object" && typeof proxy.name === "string") {
+          pushEntry(proxy.name, proxy.uri || proxy.url || "");
+        }
+      }
+    }
+
+    if (Array.isArray(node.outbounds)) {
+      const baseName = String(node.remarks || parentName || "").trim();
+      for (const outbound of node.outbounds) {
+        if (!outbound || typeof outbound !== "object") continue;
+        const protocol = String(outbound.protocol || outbound.type || "").trim().toLowerCase();
+        if (!["vless", "vmess", "ss", "ssr", "trojan"].includes(protocol)) continue;
+        const tag = String(outbound.tag || outbound.name || protocol).trim();
+        const name = [baseName, tag].filter(Boolean).join(" ").trim() || tag || protocol;
+        pushEntry(name, "");
+      }
+    }
+
+    for (const value of Object.values(node)) {
+      if (value && typeof value === "object") visit(value, String(node.remarks || parentName || "").trim());
+    }
   }
+
+  try {
+    visit(JSON.parse(String(text || "")));
+  } catch {
+    return [];
+  }
+
   return out;
 }
 
@@ -361,34 +437,26 @@ function parseServerEntriesFromText(rawText) {
 
   const format = detectSourceFormat(text);
   if (format === "yml") {
-    const lines = text.split(/\r?\n/);
-    for (const line of lines) {
-      const match = line.match(/^\s*-\s*name\s*:\s*(.+)\s*$/);
-      if (!match) continue;
-      let name = match[1].trim();
-      if ((name.startsWith("\"") && name.endsWith("\"")) || (name.startsWith("'") && name.endsWith("'"))) {
-        name = name.slice(1, -1);
-      }
+    for (const name of parseYamlProxyNames(text)) {
       pushEntry(name, "");
     }
     return out;
+  }
+  if (format === "json") {
+    return parseJsonServerEntries(text);
   }
 
   const decoded = decodeBase64IfNeeded(text);
   for (const line of decoded.split(/\r?\n/)) {
     const uri = line.trim();
     if (!/^(vmess|vless|ss|ssr|trojan):\/\//.test(uri)) continue;
-    let title = "";
-    try {
-      const hashIndex = uri.indexOf("#");
-      if (hashIndex >= 0) title = decodeURIComponent(uri.slice(hashIndex + 1));
-    } catch {
-      title = "";
-    }
-    if (!title) title = uri.slice(0, 80);
-    pushEntry(title, uri);
+    pushEntry(decodeUriTitle(uri), uri);
   }
   return out;
+}
+
+function parseServersFromText(rawText) {
+  return parseServerEntriesFromText(rawText).map((entry) => entry.name);
 }
 
 function normalizeOutputFormatToken(value) {
