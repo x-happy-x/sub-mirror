@@ -84,9 +84,26 @@ jobs:
             set -euo pipefail
             REMOTE_DIR="${{ secrets.REMOTE_DIR }}"
             REPO_URL="https://github.com/${{ github.repository }}.git"
+            DEPLOY_USER="$(id -un)"
+            DEPLOY_GROUP="$(id -gn)"
 
             mkdir -p "${REMOTE_DIR}"
+
+            # Try to fix ownership when directory was created by another user (for example root).
+            if [ ! -w "${REMOTE_DIR}" ] || { [ -e "${REMOTE_DIR}/.git" ] && [ ! -r "${REMOTE_DIR}/.git" ]; }; then
+              if command -v sudo >/dev/null 2>&1; then
+                sudo chown -R "${DEPLOY_USER}:${DEPLOY_GROUP}" "${REMOTE_DIR}" || true
+              fi
+            fi
+
+            if [ ! -w "${REMOTE_DIR}" ] || { [ -e "${REMOTE_DIR}/.git" ] && [ ! -r "${REMOTE_DIR}/.git" ]; }; then
+              echo "[ERR] no write/read permissions for ${REMOTE_DIR} (user: ${DEPLOY_USER})" >&2
+              echo "Fix on server: sudo chown -R ${DEPLOY_USER}:${DEPLOY_GROUP} ${REMOTE_DIR}" >&2
+              exit 1
+            fi
+
             cd "${REMOTE_DIR}"
+            git config --global --add safe.directory "${REMOTE_DIR}"
 
             if [ ! -d .git ]; then
               if [ -n "$(ls -A . 2>/dev/null)" ]; then
