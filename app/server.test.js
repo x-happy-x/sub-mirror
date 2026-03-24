@@ -86,7 +86,7 @@ test("produceOutput converts clash yaml fixture to raw URI list", async () => {
 });
 
 test("produceOutput converts JSON outbound bundle fixture to raw URI list", async () => {
-  const fixturePath = new URL("../data/sample/raw.json", import.meta.url);
+  const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
   const jsonInput = fs.readFileSync(fixturePath, "utf8");
   const rawResult = await produceOutput(jsonInput, "raw");
 
@@ -106,7 +106,7 @@ test("produceOutput converts JSON outbound bundle fixture to raw URI list", asyn
 });
 
 test("produceOutput converts JSON outbound bundle fixture to clash yaml", async () => {
-  const fixturePath = new URL("../data/sample/raw.json", import.meta.url);
+  const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
   const jsonInput = fs.readFileSync(fixturePath, "utf8");
   const clashResult = await produceOutput(jsonInput, "clash");
 
