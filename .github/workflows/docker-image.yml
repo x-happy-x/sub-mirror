@@ -119,18 +119,34 @@ jobs:
               echo "[DEPLOY] $*"
             }
 
+            describe_path() {
+              target="$1"
+              if [ -e "${target}" ]; then
+                echo "[DEPLOY] path info for ${target}:" >&2
+                ls -ld "${target}" >&2 || true
+                stat -c '[DEPLOY] owner=%U group=%G perms=%A mode=%a path=%n' "${target}" >&2 || true
+              else
+                echo "[DEPLOY] path does not exist yet: ${target}" >&2
+              fi
+            }
+
             log_step "ensure remote directory exists: ${REMOTE_DIR}"
             mkdir -p "${REMOTE_DIR}"
+            describe_path "${REMOTE_DIR}"
 
             # Try to fix ownership when directory was created by another user (for example root).
             if [ ! -w "${REMOTE_DIR}" ] || { [ -e "${REMOTE_DIR}/.git" ] && [ ! -r "${REMOTE_DIR}/.git" ]; }; then
-              if command -v sudo >/dev/null 2>&1; then
+              if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
                 log_step "attempt chown for ${REMOTE_DIR}"
-                sudo chown -R "${DEPLOY_USER}:${DEPLOY_GROUP}" "${REMOTE_DIR}" || true
+                sudo -n chown -R "${DEPLOY_USER}:${DEPLOY_GROUP}" "${REMOTE_DIR}" || true
+                describe_path "${REMOTE_DIR}"
+              else
+                echo "[DEPLOY] passwordless sudo is unavailable for ${DEPLOY_USER}; cannot auto-fix ownership" >&2
               fi
             fi
 
             if [ ! -w "${REMOTE_DIR}" ] || { [ -e "${REMOTE_DIR}/.git" ] && [ ! -r "${REMOTE_DIR}/.git" ]; }; then
+              describe_path "${REMOTE_DIR}"
               echo "[ERR] no write/read permissions for ${REMOTE_DIR} (user: ${DEPLOY_USER})" >&2
               echo "Fix on server: sudo chown -R ${DEPLOY_USER}:${DEPLOY_GROUP} ${REMOTE_DIR}" >&2
               exit 1
