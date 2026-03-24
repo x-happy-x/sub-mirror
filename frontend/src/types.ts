@@ -1,5 +1,5 @@
 export type Endpoint = "sub" | "last";
-export type Output = "raw" | "yml";
+export type Output = "raw" | "raw_base64" | "json" | "yml";
 
 export type SubscriptionPayload = {
   endpoint: Endpoint;

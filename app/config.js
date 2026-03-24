@@ -15,12 +15,16 @@ const PROFILE_ROOT_DIRS = PROFILE_DIR_ENV
   : ["/data/profiles", PROFILE_FALLBACK_DIR];
 const HEADER_POLICY_DEFAULT = "file_only";
 const OUTPUT_RAW = "raw";
+const OUTPUT_RAW_BASE64 = "raw_base64";
+const OUTPUT_JSON = "json";
 const OUTPUT_CLASH = "clash";
 
 function normalizeOutput(value) {
   if (!value) return null;
   const s = String(value).trim().toLowerCase();
   if (s === "yml" || s === "yaml" || s === OUTPUT_CLASH) return OUTPUT_CLASH;
+  if (s === "raw_base64" || s === "raw-base64" || s === "base64") return OUTPUT_RAW_BASE64;
+  if (s === OUTPUT_JSON) return OUTPUT_JSON;
   if (s === "raw" || s === "plain" || s === "text" || s === "source") return OUTPUT_RAW;
   return null;
 }
@@ -52,6 +56,8 @@ export {
   PROFILE_ROOT_DIRS,
   HEADER_POLICY_DEFAULT,
   OUTPUT_RAW,
+  OUTPUT_RAW_BASE64,
+  OUTPUT_JSON,
   OUTPUT_CLASH,
   OUTPUT_DEFAULT,
   OUT_RAW,

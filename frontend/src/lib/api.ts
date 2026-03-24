@@ -139,7 +139,7 @@ export type PublicShortMeta = {
   totalBytes: number;
   provider: string;
   sourceFormat: string;
-  sourceFormatToken: "raw" | "yml" | "";
+  sourceFormatToken: "raw" | "json" | "yml" | "";
   serversCount: number;
   serverEntries: Array<{ name: string; uri: string }>;
   app: string;
@@ -168,7 +168,9 @@ export async function fetchPublicShortMeta(id: string): Promise<PublicShortMeta>
     sourceFormat: String(meta.sourceFormat || ""),
     sourceFormatToken: String(meta.sourceFormatToken || "") === "raw"
       ? "raw"
-      : (String(meta.sourceFormatToken || "") === "yml" ? "yml" : ""),
+      : (String(meta.sourceFormatToken || "") === "json"
+        ? "json"
+        : (String(meta.sourceFormatToken || "") === "yml" ? "yml" : "")),
     serversCount: Number(meta.serversCount || 0),
     serverEntries: Array.isArray(meta.serverEntries)
       ? meta.serverEntries

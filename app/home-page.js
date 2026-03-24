@@ -575,6 +575,8 @@ function renderHomePage() {
             <div id="outputChips" class="chip-row">
               <button type="button" class="chip active" data-value="yml">yml / clash</button>
               <button type="button" class="chip" data-value="raw">raw</button>
+              <button type="button" class="chip" data-value="raw_base64">raw (base64)</button>
+              <button type="button" class="chip" data-value="json">json</button>
             </div>
           </div>
 

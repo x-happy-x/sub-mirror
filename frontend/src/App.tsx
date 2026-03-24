@@ -121,7 +121,7 @@ function parseUrlToPayload(raw: string): { ok: boolean; payload?: SubscriptionPa
       payload: {
         endpoint: path === "sub" ? "sub" : "last",
         sub_url: u.searchParams.get("sub_url") || "",
-        output: (u.searchParams.get("output") || "yml") as "raw" | "yml",
+        output: (u.searchParams.get("output") || "yml") as SubscriptionPayload["output"],
         app: u.searchParams.get("app") || "",
         device: u.searchParams.get("device") || "",
         profile: u.searchParams.get("profile") || "",
@@ -1471,6 +1471,8 @@ export default function App() {
           <div className="chip-row">
             <TipChipButton tip="Формат YAML" className={`chip-btn ${payload.output === "yml" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "yml" })}>yml</TipChipButton>
             <TipChipButton tip="Формат RAW" className={`chip-btn ${payload.output === "raw" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "raw" })}>raw</TipChipButton>
+            <TipChipButton tip="Формат RAW в base64" className={`chip-btn ${payload.output === "raw_base64" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "raw_base64" })}>raw (base64)</TipChipButton>
+            <TipChipButton tip="Формат JSON" className={`chip-btn ${payload.output === "json" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "json" })}>json</TipChipButton>
           </div>
 
           <label className="composer-label">ОС</label>

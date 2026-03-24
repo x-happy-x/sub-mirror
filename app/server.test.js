@@ -15,6 +15,9 @@ test("normalizeOutput supports aliases", () => {
   assert.equal(normalizeOutput("yaml"), "clash");
   assert.equal(normalizeOutput("clash"), "clash");
   assert.equal(normalizeOutput("raw"), "raw");
+  assert.equal(normalizeOutput("raw_base64"), "raw_base64");
+  assert.equal(normalizeOutput("raw-base64"), "raw_base64");
+  assert.equal(normalizeOutput("json"), "json");
   assert.equal(normalizeOutput("source"), "raw");
   assert.equal(normalizeOutput("unknown"), null);
 });
@@ -66,6 +69,20 @@ test("produceOutput returns expected content types for raw and clash", async () 
   const clashResult = await produceOutput(yamlInput, "clash");
   assert.equal(clashResult.ok, true);
   assert.equal(clashResult.contentType, "text/yaml; charset=utf-8");
+});
+
+test("produceOutput supports raw base64 and json outputs", async () => {
+  const rawInput = "vless://11111111-1111-4111-8111-111111111111@example.com:443?type=tcp&security=tls#test";
+
+  const base64Result = await produceOutput(rawInput, "raw_base64");
+  assert.equal(base64Result.ok, true);
+  assert.equal(base64Result.contentType, "text/plain; charset=utf-8");
+  assert.equal(Buffer.from(String(base64Result.body), "base64").toString("utf8"), rawInput);
+
+  const jsonResult = await produceOutput(rawInput, "json");
+  assert.equal(jsonResult.ok, true);
+  assert.equal(jsonResult.contentType, "application/json; charset=utf-8");
+  assert.deepEqual(JSON.parse(String(jsonResult.body)), [rawInput]);
 });
 
 test("produceOutput wraps clash output for flclashx into full config", async () => {

@@ -286,6 +286,15 @@ function detectSourceFormat(rawText, contentType = "") {
   if (!text) return "empty";
   const ct = String(contentType || "").toLowerCase();
   if (text.startsWith("<!doctype html") || text.startsWith("<html") || ct.includes("text/html")) return "html";
+  if (ct.includes("application/json")) return "json";
+  if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
+    try {
+      JSON.parse(text);
+      return "json";
+    } catch {
+      // continue
+    }
+  }
   if (/^\s*proxies\s*:\s*$/m.test(text)) return "yml";
   if (/^(vmess|vless|ss|ssr|trojan):\/\//m.test(text)) return "raw";
   if (/^[A-Za-z0-9+/=\r\n]+$/.test(text) && text.length > 120) {
@@ -386,6 +395,7 @@ function normalizeOutputFormatToken(value) {
   const token = String(value || "").trim().toLowerCase();
   if (!token) return "";
   if (token.startsWith("raw")) return "raw";
+  if (token.startsWith("json")) return "json";
   if (token === "yaml" || token.startsWith("yml")) return "yml";
   return "";
 }

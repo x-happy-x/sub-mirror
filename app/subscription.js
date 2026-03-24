@@ -9,6 +9,8 @@ import {
   PROFILE_ROOT_DIRS,
   HEADER_POLICY_DEFAULT,
   OUTPUT_RAW,
+  OUTPUT_RAW_BASE64,
+  OUTPUT_JSON,
   OUTPUT_CLASH,
   OUTPUT_DEFAULT,
   OUT_RAW,
@@ -75,6 +77,13 @@ function extractVlessLines(text) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.startsWith("vless://"));
+}
+
+function extractSubscriptionLines(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^(vmess|vless|ss|ssr|trojan):\/\//.test(line));
 }
 
 function hasAnySubscriptions(text) {
@@ -958,7 +967,7 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
   const outputFromHeader = reqHeaders["x-output"];
   const explicitOutput = parseOptionalOutput(outputFromQuery ?? outputFromHeader);
   if ((outputFromQuery || outputFromHeader) && !explicitOutput) {
-    return { ok: false, status: 400, error: "unsupported output (use: clash|yml|yaml|raw)" };
+    return { ok: false, status: 400, error: "unsupported output (use: clash|yml|yaml|raw|raw_base64|json)" };
   }
 
   const legacyFromQuery = reqUrl.searchParams.get("use_converter");
@@ -1066,6 +1075,43 @@ async function produceOutput(rawText, output, options = {}) {
   }
   if (isHtml(rawText)) {
     return { ok: false, error: "got HTML (anti-bot page)" };
+  }
+
+  if (output === OUTPUT_RAW_BASE64) {
+    const rawResult = await produceOutput(rawText, OUTPUT_RAW, options);
+    if (!rawResult.ok) return rawResult;
+    return {
+      ok: true,
+      body: Buffer.from(String(rawResult.body || ""), "utf8").toString("base64"),
+      contentType: "text/plain; charset=utf-8",
+      conversion: rawResult.conversion === "none-raw" ? "base64-raw" : `${rawResult.conversion}+base64-raw`,
+    };
+  }
+
+  if (output === OUTPUT_JSON) {
+    const trimmed = String(rawText || "").trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return {
+          ok: true,
+          body: JSON.stringify(parsed, null, 2),
+          contentType: "application/json; charset=utf-8",
+          conversion: "none-json",
+        };
+      } catch {
+        // fall through to raw->json conversion
+      }
+    }
+
+    const rawResult = await produceOutput(rawText, OUTPUT_RAW, options);
+    if (!rawResult.ok) return rawResult;
+    return {
+      ok: true,
+      body: JSON.stringify(extractSubscriptionLines(rawResult.body), null, 2),
+      contentType: "application/json; charset=utf-8",
+      conversion: rawResult.conversion === "none-raw" ? "raw-json" : `${rawResult.conversion}+raw-json`,
+    };
   }
 
   if (output === OUTPUT_RAW) {
