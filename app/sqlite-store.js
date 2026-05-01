@@ -854,10 +854,10 @@ async function getShortLinkPermissions(shortLinkId, actor) {
   if (!username) {
     return {
       link,
-      canView: true,
-      canEdit: true,
+      canView: false,
+      canEdit: false,
       canManageAccess: false,
-      accessLevel: "edit",
+      accessLevel: "",
     };
   }
   if (role === "admin") {
