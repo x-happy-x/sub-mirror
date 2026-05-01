@@ -19,6 +19,7 @@ COPY app/package.json ./package.json
 COPY app/package-lock.json ./package-lock.json
 RUN npm install
 COPY app/*.js ./
+COPY app/bin ./bin
 COPY resources/ua-catalog.json /resources/ua-catalog.json
 COPY resources/admin.json /resources/admin.json
 COPY resources/apps.yml /resources/apps.yml

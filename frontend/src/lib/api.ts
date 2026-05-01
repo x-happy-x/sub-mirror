@@ -213,6 +213,21 @@ export async function parseBulkImport(text: string): Promise<ImportedProxyItem[]
   return Array.isArray(json.items) ? json.items as ImportedProxyItem[] : [];
 }
 
+export async function decryptHappSubscription(subUrl: string): Promise<{ originalUrl: string; resolvedUrl: string; changed: boolean }> {
+  const resp = await fetch("/api/happ-decrypt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subUrl }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "happ decrypt failed");
+  return {
+    originalUrl: String(json.originalUrl || subUrl),
+    resolvedUrl: String(json.resolvedUrl || ""),
+    changed: Boolean(json.changed),
+  };
+}
+
 export async function fetchShortLinkUsers(id: string): Promise<ShortLinkUsersData> {
   const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/users`);
   const json = await resp.json();

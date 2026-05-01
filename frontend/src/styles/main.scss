@@ -1211,6 +1211,24 @@ textarea {
   color: var(--muted);
 }
 
+.composer-original-link {
+  display: block;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.happ-decrypt-dialog {
+  display: grid;
+  gap: 10px;
+}
+
 .merge-list {
   display: grid;
   gap: 8px;

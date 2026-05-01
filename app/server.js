@@ -72,6 +72,7 @@ import {
   produceOutput,
   fetchWithNode,
   applyOverridesToNormalized,
+  decryptHappLink,
   handleSubscription,
   handleLast,
   handleEcho,
@@ -1076,6 +1077,26 @@ async function handleParseBulkImport(req, res) {
   }
 }
 
+async function handleHappDecrypt(req, res) {
+  try {
+    const body = await readJsonBody(req, 256 * 1024);
+    const subUrl = String(body?.subUrl || body?.sub_url || "").trim();
+    if (!subUrl) {
+      sendJson(res, 400, { ok: false, error: "subUrl is required" });
+      return;
+    }
+    const result = await decryptHappLink(subUrl);
+    sendJson(res, 200, {
+      ok: true,
+      originalUrl: result.originalUrl,
+      resolvedUrl: result.resolvedUrl,
+      changed: result.changed,
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "happ decrypt failed" });
+  }
+}
+
 async function handleGetShortLinkUsers(req, res, id) {
   const access = await requireShortLinkPermission(req, res, id, "view");
   if (!access) return;
@@ -1888,6 +1909,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && routePath === "/api/import/parse") {
     if (!(await requireApiAuth(req, res))) return;
     void handleParseBulkImport(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/happ-decrypt") {
+    if (!(await requireApiAuth(req, res))) return;
+    void handleHappDecrypt(req, res);
     return;
   }
   if (req.method === "GET" && localSourceApiMatch) {

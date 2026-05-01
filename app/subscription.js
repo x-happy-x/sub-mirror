@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   SUB_URL_DEFAULT,
@@ -42,11 +44,80 @@ import {
 } from "./source-snapshots.js";
 
 const UA_CATALOG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../resources/ua-catalog.json");
+const execFile = promisify(execFileCb);
+const HAPP_DECRYPT_BIN = path.resolve(
+  process.env.HAPP_DECRYPT_BIN || path.join(path.dirname(fileURLToPath(import.meta.url)), "bin/happ-decrypt-linux-x64_x86"),
+);
 const LOCAL_SOURCE_ROOTS = [
   process.cwd(),
   "/data",
   "/resources",
 ].map((root) => path.resolve(root));
+
+function isEncryptedHappLink(value) {
+  return /^happ:\/\/crypt\d*\//i.test(String(value || "").trim());
+}
+
+function stripIndentedBlock(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s+/, ""))
+    .join("\n")
+    .trim();
+}
+
+function extractHappDecryptResult(stdout) {
+  const text = String(stdout || "").replace(/\r/g, "").trim();
+  if (!text) throw new Error("empty decrypt output");
+  const resultMatch = text.match(/(?:^|\n)Result\s*\n([\s\S]+)$/m);
+  if (resultMatch?.[1]) return stripIndentedBlock(resultMatch[1]);
+  const errorMatch = text.match(/(?:^|\n)Error\s*\n([\s\S]+)$/m);
+  if (errorMatch?.[1]) throw new Error(stripIndentedBlock(errorMatch[1]));
+  if (/^https?:\/\//i.test(text)) return text;
+  throw new Error("unable to parse decrypt output");
+}
+
+async function decryptHappLink(subUrl) {
+  const raw = String(subUrl || "").trim();
+  if (!isEncryptedHappLink(raw)) {
+    return {
+      ok: true,
+      changed: false,
+      originalUrl: raw,
+      resolvedUrl: raw,
+      output: raw,
+    };
+  }
+  if (!fs.existsSync(HAPP_DECRYPT_BIN)) {
+    throw new Error(`happ decrypt binary not found: ${HAPP_DECRYPT_BIN}`);
+  }
+  try {
+    const { stdout, stderr } = await execFile(HAPP_DECRYPT_BIN, [raw], {
+      timeout: 15_000,
+      maxBuffer: 1024 * 1024,
+    });
+    const resolvedUrl = extractHappDecryptResult(stdout || stderr || "");
+    return {
+      ok: true,
+      changed: resolvedUrl !== raw,
+      originalUrl: raw,
+      resolvedUrl,
+      output: String(stdout || "").trim(),
+    };
+  } catch (error) {
+    const stdout = String(error?.stdout || "");
+    const stderr = String(error?.stderr || "");
+    const detail = stdout || stderr;
+    if (detail) {
+      try {
+        extractHappDecryptResult(detail);
+      } catch (parseError) {
+        throw new Error(parseError?.message || "happ decrypt failed");
+      }
+    }
+    throw new Error(error?.message || "happ decrypt failed");
+  }
+}
 
 function isHtml(s) {
   const t = s.trim().toLowerCase();
@@ -2234,7 +2305,8 @@ async function fetchMergedSource(mergeId) {
 }
 
 async function fetchWithNode(subUrl, forwardHeaders) {
-  const raw = String(subUrl || "").trim();
+  const decrypted = await decryptHappLink(subUrl);
+  const raw = String(decrypted.resolvedUrl || subUrl || "").trim();
   if (raw.startsWith("merge:")) {
     return fetchMergedSource(raw.slice(6).trim());
   }
@@ -2872,6 +2944,9 @@ export {
   renderOutputFromNormalized,
   loadLatestStoredSnapshotBundle,
   sourceFormatMatchesOutput,
+  isEncryptedHappLink,
+  decryptHappLink,
+  extractHappDecryptResult,
   parseProfileYaml,
   getUaCatalogOptions,
   readProfileFile,

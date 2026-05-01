@@ -11,6 +11,7 @@ import {
   createShortLink,
   createLocalSource,
   createMergedSource,
+  decryptHappSubscription,
   deleteProfile,
   fetchProfileCatalog,
   fetchAppsCatalog,
@@ -123,6 +124,10 @@ function countSourceServers(value: string): number {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => /^(vless|vmess|ss|ssr|trojan):\/\//.test(line)).length;
+}
+
+function isEncryptedHappLink(value: string): boolean {
+  return /^happ:\/\/crypt\d*\//i.test(String(value || "").trim());
 }
 
 function labelsFromPayload(p: SubscriptionPayload): string[] {
@@ -338,6 +343,11 @@ export default function App() {
   const [composerFileName, setComposerFileName] = useState("");
   const [composerFileBody, setComposerFileBody] = useState("");
   const [composerTextBody, setComposerTextBody] = useState("");
+  const [originalHappUrl, setOriginalHappUrl] = useState("");
+  const [happDecryptDismissedUrl, setHappDecryptDismissedUrl] = useState("");
+  const [showHappDecryptPrompt, setShowHappDecryptPrompt] = useState(false);
+  const [happDecryptLoading, setHappDecryptLoading] = useState(false);
+  const [happDecryptStatus, setHappDecryptStatus] = useState("");
   const [name, setName] = useState("");
   const [editingIndex, setEditingIndex] = useState<number>(-1);
   const [importUrl, setImportUrl] = useState("");
@@ -618,6 +628,11 @@ export default function App() {
     setComposerFileName("");
     setComposerFileBody("");
     setComposerTextBody("");
+    setOriginalHappUrl("");
+    setHappDecryptDismissedUrl("");
+    setShowHappDecryptPrompt(false);
+    setHappDecryptLoading(false);
+    setHappDecryptStatus("");
     setName("");
     setEditingIndex(-1);
   };
@@ -674,6 +689,40 @@ export default function App() {
       setStatus("Не удалось прочитать файл");
     } finally {
       event.target.value = "";
+    }
+  };
+
+  useEffect(() => {
+    if (composerSourceMode !== "url") return;
+    const subUrl = String(payload.sub_url || "").trim();
+    if (!isEncryptedHappLink(subUrl)) return;
+    if (originalHappUrl && originalHappUrl === subUrl) return;
+    if (happDecryptDismissedUrl && happDecryptDismissedUrl === subUrl) return;
+    setShowHappDecryptPrompt(true);
+    setHappDecryptStatus("");
+  }, [composerSourceMode, payload.sub_url, originalHappUrl, happDecryptDismissedUrl]);
+
+  const applyHappDecryption = async () => {
+    const current = String(payload.sub_url || "").trim();
+    if (!isEncryptedHappLink(current)) {
+      setShowHappDecryptPrompt(false);
+      return;
+    }
+    try {
+      setHappDecryptLoading(true);
+      const result = await decryptHappSubscription(current);
+      setPayload((prev) => ({ ...prev, sub_url: result.resolvedUrl }));
+      setOriginalHappUrl(result.originalUrl);
+      setHappDecryptDismissedUrl("");
+      setHappDecryptStatus(`Успех: ${result.resolvedUrl}`);
+      setShowHappDecryptPrompt(false);
+      notify("success", "Happ-ссылка расшифрована");
+    } catch (e) {
+      const message = (e as Error)?.message || "Не удалось расшифровать happ-ссылку";
+      setHappDecryptStatus(`Ошибка: ${message}`);
+      notify("error", message);
+    } finally {
+      setHappDecryptLoading(false);
     }
   };
 
@@ -831,6 +880,10 @@ export default function App() {
     setEditingIndex(idx);
     setName(item.title);
     const nextPayload = { ...defaultPayload(), ...item.payload };
+    setOriginalHappUrl("");
+    setHappDecryptDismissedUrl("");
+    setHappDecryptStatus("");
+    setShowHappDecryptPrompt(false);
     setPayload(nextPayload);
     openModal("composer");
     await hydrateComposerSource(nextPayload);
@@ -1964,9 +2017,38 @@ export default function App() {
             <TipChipButton tip="Вставить список адресов вручную" className={`chip-btn ${composerSourceMode === "text" ? "active" : ""}`} onClick={() => setComposerSourceMode("text")}>Поле</TipChipButton>
           </div>
           {composerSourceMode === "url" ? (
-            <div className="url-row">
-              <TextInput placeholder="URL или встроенный файл, например bypass-all.txt" value={payload.sub_url} onChange={(e) => setPayload({ ...payload, sub_url: e.target.value })} />
-            </div>
+            <>
+              <div className="url-row">
+                <TextInput
+                  placeholder="URL или встроенный файл, например bypass-all.txt"
+                  value={payload.sub_url}
+                  onChange={(e) => {
+                    const nextValue = e.target.value;
+                    setPayload({ ...payload, sub_url: nextValue });
+                    if (nextValue.trim() !== originalHappUrl.trim()) {
+                      setOriginalHappUrl("");
+                      setHappDecryptStatus("");
+                    }
+                    if (nextValue.trim() !== happDecryptDismissedUrl.trim()) {
+                      setHappDecryptDismissedUrl("");
+                    }
+                  }}
+                />
+              </div>
+              {happDecryptStatus ? <div className="composer-meta-hint">{happDecryptStatus}</div> : null}
+              {originalHappUrl ? (
+                <button
+                  type="button"
+                  className="composer-original-link"
+                  onClick={() => {
+                    void copyToClipboard(originalHappUrl);
+                    notify("info", "Оригинальная happ-ссылка скопирована");
+                  }}
+                >
+                  Оригинал: {originalHappUrl}
+                </button>
+              ) : null}
+            </>
           ) : null}
           {composerSourceMode === "file" ? (
             <>
@@ -2066,6 +2148,37 @@ export default function App() {
             <TipIconButton tip="Открыть тестер" aria-label="Открыть тестер" icon={<FlaskIcon className="btn-icon" />} onClick={() => openModal("tester")} />
           </div>
           <div className="status">{status}</div>
+        </Modal>
+      ) : null}
+
+      {showHappDecryptPrompt ? (
+        <Modal
+          onClose={() => {
+            setHappDecryptDismissedUrl(String(payload.sub_url || "").trim());
+            setShowHappDecryptPrompt(false);
+          }}
+          title="Расшифровать Happ-ссылку"
+          showCloseButton
+        >
+          <div className="happ-decrypt-dialog">
+            <div className="status">Обнаружена ссылка вида `happ://crypt...`. Можно сразу расшифровать её и сохранить в подписке уже обычный URL.</div>
+            <div className="toolbar">
+              <TipButton
+                tip="Оставить исходную happ-ссылку без расшифровки"
+                className="btn"
+                onClick={() => {
+                  setHappDecryptDismissedUrl(String(payload.sub_url || "").trim());
+                  setShowHappDecryptPrompt(false);
+                }}
+              >
+                Не расшифровывать
+              </TipButton>
+              <TipButton tip="Расшифровать ссылку через binary" tone="primary" className="btn" onClick={() => void applyHappDecryption()} disabled={happDecryptLoading}>
+                {happDecryptLoading ? "Расшифровка..." : "Расшифровать"}
+              </TipButton>
+            </div>
+            {happDecryptStatus ? <div className="composer-meta-hint">{happDecryptStatus}</div> : null}
+          </div>
         </Modal>
       ) : null}
 
