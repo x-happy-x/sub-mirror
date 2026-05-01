@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps } from "react";
-import type { AuthUser, FavoriteItem, ImportedProxyItem, MockSource, ProfileCatalog, ShortLinkUsersData, SubscriptionPayload, SubTestResponse, UACatalog } from "./types";
+import type { AuthUser, FavoriteItem, ImportedProxyItem, MockSource, ProfileCatalog, ShortLinkAccessGrant, ShortLinkUsersData, SubscriptionPayload, SubTestResponse, UACatalog } from "./types";
 import { readFavorites, writeFavorites } from "./lib/storage";
 import {
   clearMockLogs,
@@ -18,6 +18,7 @@ import {
   fetchFavorites as fetchFavoritesRemote,
   fetchUaCatalog,
   fetchShortLink,
+  fetchShortLinkAccess,
   fetchPublicShortLink,
   fetchPublicShortMeta,
   fetchLocalSource,
@@ -37,6 +38,7 @@ import {
   saveProfile,
   updateMockSource,
   updateShortLink,
+  updateShortLinkAccess,
   type AppsCatalogItem,
   type PublicShortMeta,
 } from "./lib/api";
@@ -47,6 +49,7 @@ import { Modal } from "./components/Modal";
 import { HeroHeader } from "./components/HeroHeader";
 import { UserMenu } from "./components/UserMenu";
 import { SharePanel } from "./components/SharePanel";
+import { OverridesModal } from "./components/OverridesModal";
 import { Button, IconButton, NotificationToasts, TextInput, Textarea, Tooltip, type NotificationItem, type NotificationLevel } from "@x-happy-x/ui-kit";
 import subLabIcon from "./assets/sub-lab-icon.png";
 
@@ -309,7 +312,7 @@ function generateHwidByOs(os: string): string {
 }
 
 export default function App() {
-  type ModalKind = "import" | "composer" | "bulkImport" | "merge" | "tester" | "mock" | "profileEditor" | "share" | "subUsers";
+  type ModalKind = "import" | "composer" | "bulkImport" | "merge" | "tester" | "mock" | "profileEditor" | "share" | "subUsers" | "overrides";
   const [theme, setTheme] = useState<"claude" | "claude-dark">(() => {
     const saved = localStorage.getItem("submirror-theme");
     if (saved === "claude" || saved === "claude-dark") return saved;
@@ -347,8 +350,10 @@ export default function App() {
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [showSubUsers, setShowSubUsers] = useState(false);
+  const [showOverrides, setShowOverrides] = useState(false);
   const [shareItem, setShareItem] = useState<FavoriteItem | null>(null);
   const [subUsersItem, setSubUsersItem] = useState<FavoriteItem | null>(null);
+  const [overridesItem, setOverridesItem] = useState<FavoriteItem | null>(null);
   const [subUsersData, setSubUsersData] = useState<ShortLinkUsersData | null>(null);
   const [subUsersLoading, setSubUsersLoading] = useState(false);
   const [subUsersMax, setSubUsersMax] = useState("0");
@@ -357,6 +362,9 @@ export default function App() {
   const [subUsersExpandedHwid, setSubUsersExpandedHwid] = useState("");
   const [shareModalMeta, setShareModalMeta] = useState<PublicShortMeta | null>(null);
   const [shareModalMetaLoading, setShareModalMetaLoading] = useState(false);
+  const [shareAccessLoading, setShareAccessLoading] = useState(false);
+  const [shareAccessOwner, setShareAccessOwner] = useState("");
+  const [shareAccessDraft, setShareAccessDraft] = useState<Record<string, "" | "view" | "edit">>({});
   const [testResult, setTestResult] = useState<SubTestResponse | null>(null);
 
   const [profileCatalog, setProfileCatalog] = useState<ProfileCatalog>({ profiles: [] });
@@ -482,7 +490,7 @@ export default function App() {
     : ((publicTypeOverrideRaw === "yml" || publicTypeOverrideRaw === "yaml" || publicTypeOverrideRaw === "clash") ? "yml" : "");
   const isAdminUser = authUser?.role === "admin";
   const isMainPath = !isAdminPath && !publicShareId;
-  const isAnyModalOpen = showImport || showComposer || showBulkImport || showMerge || showTester || showMock || showProfileEditor || showShare || showSubUsers;
+  const isAnyModalOpen = showImport || showComposer || showBulkImport || showMerge || showTester || showMock || showProfileEditor || showShare || showSubUsers || showOverrides;
 
   const refreshAdminUsers = async () => {
     const list = await adminListUsers();
@@ -525,6 +533,9 @@ export default function App() {
     if (!showShare || !shareItem?.shortId) {
       setShareModalMeta(null);
       setShareModalMetaLoading(false);
+      setShareAccessLoading(false);
+      setShareAccessOwner("");
+      setShareAccessDraft({});
       return;
     }
     setShareModalMeta(null);
@@ -533,7 +544,33 @@ export default function App() {
       .then((meta) => setShareModalMeta(meta))
       .catch(() => {})
       .finally(() => setShareModalMetaLoading(false));
-  }, [showShare, shareItem?.shortId]);
+    if (!isAdminUser) return;
+    setShareAccessLoading(true);
+    void Promise.all([
+      adminUsers.length > 0 ? Promise.resolve(adminUsers) : adminListUsers(),
+      fetchShortLinkAccess(shareItem.shortId),
+    ])
+      .then(([users, access]) => {
+        if (adminUsers.length === 0) setAdminUsers(users);
+        setShareAccessOwner(access.ownerUsername);
+        const next: Record<string, "" | "view" | "edit"> = {};
+        for (const user of users) {
+          if (user.role === "admin") continue;
+          if (user.username === access.ownerUsername) {
+            next[user.username] = "edit";
+            continue;
+          }
+          const grant = access.grants.find((item) => item.username === user.username);
+          next[user.username] = grant?.accessLevel || "";
+        }
+        setShareAccessDraft(next);
+      })
+      .catch(() => {
+        setShareAccessOwner("");
+        setShareAccessDraft({});
+      })
+      .finally(() => setShareAccessLoading(false));
+  }, [showShare, shareItem?.shortId, isAdminUser, adminUsers]);
 
   const saveFavorites = (list: FavoriteItem[]) => {
     const next = list.slice(0, 50);
@@ -558,6 +595,7 @@ export default function App() {
     setShowProfileEditor(false);
     setShowShare(false);
     setShowSubUsers(false);
+    setShowOverrides(false);
   };
 
   const openModal = (kind: ModalKind) => {
@@ -571,6 +609,7 @@ export default function App() {
     if (kind === "profileEditor") setShowProfileEditor(true);
     if (kind === "share") setShowShare(true);
     if (kind === "subUsers") setShowSubUsers(true);
+    if (kind === "overrides") setShowOverrides(true);
   };
 
   const resetComposer = () => {
@@ -701,7 +740,10 @@ export default function App() {
           sub_url: local.subUrl,
           output: bulkImportOutput,
         };
-        const short = await createShortLink(nextPayload);
+        const short = await createShortLink(
+          nextPayload,
+          chunks.length > 1 ? `${bulkImportName.trim()} ${String(index + 1).padStart(2, "0")}` : bulkImportName.trim(),
+        );
         createdItems.push({
           title: chunks.length > 1 ? `${bulkImportName.trim()} ${String(index + 1).padStart(2, "0")}` : bulkImportName.trim(),
           url: short.shortUrl,
@@ -733,9 +775,9 @@ export default function App() {
       let shortUrl = existing?.url || "";
       const nextPayload = { ...payload, sub_url: resolvedSubUrl };
 
-      if (shortId && !forceNew) await updateShortLink(shortId, nextPayload);
+      if (shortId && !forceNew) await updateShortLink(shortId, nextPayload, name.trim());
       else {
-        const created = await createShortLink(nextPayload);
+        const created = await createShortLink(nextPayload, name.trim());
         shortId = created.id;
         shortUrl = created.shortUrl;
       }
@@ -782,6 +824,10 @@ export default function App() {
   const onEdit = async (idx: number) => {
     const item = favorites[idx];
     if (!item) return;
+    if (item.permissions?.canEdit === false) {
+      notify("warning", "Эту подписку можно только просматривать");
+      return;
+    }
     setEditingIndex(idx);
     setName(item.title);
     const nextPayload = { ...defaultPayload(), ...item.payload };
@@ -791,6 +837,10 @@ export default function App() {
   };
 
   const onDelete = (idx: number) => {
+    if (favorites[idx]?.permissions?.canEdit === false) {
+      notify("warning", "Эту подписку нельзя удалять");
+      return;
+    }
     const next = favorites.filter((_, i) => i !== idx);
     saveFavorites(next);
     notify("info", "Подписка удалена");
@@ -832,7 +882,7 @@ export default function App() {
         sub_url: merged.subUrl,
         output: mergeOutput,
       };
-      const created = await createShortLink(mergedPayload);
+      const created = await createShortLink(mergedPayload, mergeName.trim());
       const next: FavoriteItem = {
         title: mergeName.trim(),
         url: created.shortUrl,
@@ -910,6 +960,10 @@ export default function App() {
     if (!selectedOs || !uaCatalog.options[selectedOs]) return [];
     return Object.keys(uaCatalog.options[selectedOs] || {});
   }, [appsCatalog, uaCatalog, selectedOs]);
+  const shareAccessUsers = useMemo(
+    () => adminUsers.filter((user) => user.role !== "admin").sort((a, b) => a.username.localeCompare(b.username)),
+    [adminUsers],
+  );
   const uaPreview = useMemo(() => {
     const os = selectedOs || String(payload.device || "");
     const app = String(payload.app || "");
@@ -1053,6 +1107,23 @@ export default function App() {
     openModal("share");
   };
 
+  const saveShareAccess = async () => {
+    if (!shareItem?.shortId) return;
+    try {
+      const grants: ShortLinkAccessGrant[] = Object.entries(shareAccessDraft)
+        .filter(([, accessLevel]) => accessLevel === "view" || accessLevel === "edit")
+        .map(([username, accessLevel]) => ({
+          username,
+          role: adminUsers.find((user) => user.username === username)?.role === "admin" ? "admin" : "user",
+          accessLevel: accessLevel === "edit" ? "edit" : "view",
+        }));
+      await updateShortLinkAccess(shareItem.shortId, grants);
+      notify("success", "Права доступа сохранены");
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось сохранить доступ");
+    }
+  };
+
   const openSubUsers = async (item: FavoriteItem) => {
     if (!item.shortId) {
       notify("warning", "Для этой подписки нет short id");
@@ -1076,6 +1147,19 @@ export default function App() {
     }
   };
 
+  const openOverrides = async (item: FavoriteItem) => {
+    if (!item.shortId) {
+      notify("warning", "Для этой подписки нет short id");
+      return;
+    }
+    if (item.permissions?.canEdit === false) {
+      notify("warning", "Недостаточно прав для редактирования overrides");
+      return;
+    }
+    setOverridesItem(item);
+    openModal("overrides");
+  };
+
   const refreshSubUsers = async () => {
     if (!subUsersItem?.shortId) return;
     const data = await fetchShortLinkUsers(subUsersItem.shortId);
@@ -1087,6 +1171,10 @@ export default function App() {
 
   const saveSubUsersPolicy = async () => {
     if (!subUsersItem?.shortId) return;
+    if (subUsersItem.permissions?.canEdit === false) {
+      notify("warning", "Недостаточно прав для изменения политики");
+      return;
+    }
     try {
       await updateShortLinkUsersPolicy(subUsersItem.shortId, {
         maxUsers: Number(subUsersMax || "0"),
@@ -1102,6 +1190,10 @@ export default function App() {
 
   const toggleSubUserBlocked = async (hwid: string, blocked: boolean, currentReason = "") => {
     if (!subUsersItem?.shortId) return;
+    if (subUsersItem.permissions?.canEdit === false) {
+      notify("warning", "Недостаточно прав для изменения пользователей");
+      return;
+    }
     const reason = blocked
       ? (window.prompt("Текст заглушки для блокировки этого пользователя", currentReason || subUsersBlockedMessage || "") || currentReason || "")
       : "";
@@ -1119,6 +1211,10 @@ export default function App() {
 
   const removeSubUser = async (hwid: string) => {
     if (!subUsersItem?.shortId) return;
+    if (subUsersItem.permissions?.canEdit === false) {
+      notify("warning", "Недостаточно прав для удаления пользователя");
+      return;
+    }
     const ok = window.confirm(`Удалить пользователя ${hwid} из списка?`);
     if (!ok) return;
     try {
@@ -1739,6 +1835,7 @@ export default function App() {
               onTest={() => void applySavedToTester(true, String(idx))}
               onShare={() => openShare(item)}
               onOpenUsers={() => void openSubUsers(item)}
+              onOpenOverrides={() => void openOverrides(item)}
             />
           ))
         )}
@@ -2114,22 +2211,66 @@ export default function App() {
 
       {showShare && shareItem ? (
         <Modal onClose={() => setShowShare(false)} title={`Поделиться: ${shareItem.title}`} showCloseButton>
-          <SharePanel
-            shortUrl={shareItem.url || buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
-            fullUrl={buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
-            shareApps={shareApps}
-            recommendedByOs={recommendedByOs}
-            orderByOs={orderByOs}
-            topMeta={shareModalMeta}
-            topMetaLoading={shareModalMetaLoading}
-            subscriptionFormat={shareItem.payload.output || ""}
-            preferredOs={shareItem.payload.device || ""}
-            preferredApp={shareItem.payload.app || ""}
-            buildAppShareLink={buildAppShareLink}
-            fetchGuide={fetchAppGuide}
-            onCopy={(text) => { void copyToClipboard(text); }}
-          />
+          <>
+            <SharePanel
+              shortUrl={shareItem.url || buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
+              fullUrl={buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
+              shareApps={shareApps}
+              recommendedByOs={recommendedByOs}
+              orderByOs={orderByOs}
+              topMeta={shareModalMeta}
+              topMetaLoading={shareModalMetaLoading}
+              subscriptionFormat={shareItem.payload.output || ""}
+              preferredOs={shareItem.payload.device || ""}
+              preferredApp={shareItem.payload.app || ""}
+              buildAppShareLink={buildAppShareLink}
+              fetchGuide={fetchAppGuide}
+              onCopy={(text) => { void copyToClipboard(text); }}
+            />
+            {isAdminUser && shareItem.shortId ? (
+              <section className="sub-card share-access-card">
+                <div className="admin-section-head">
+                  <h2>Доступ</h2>
+                  <p>Админ может выдать `view` или `edit` на эту подписку конкретным пользователям.</p>
+                </div>
+                {shareAccessLoading ? <div className="status">Загрузка доступа...</div> : null}
+                {!shareAccessLoading ? (
+                  <>
+                    <div className="status">Владелец: {shareAccessOwner || "не задан"}</div>
+                    <div className="share-access-list">
+                      {shareAccessUsers.length === 0 ? <div className="status">Нет обычных пользователей для выдачи доступа.</div> : null}
+                      {shareAccessUsers.map((user) => (
+                        <label key={user.username} className="share-access-row">
+                          <span>{user.username}</span>
+                          <select
+                            value={shareAccessDraft[user.username] || ""}
+                            disabled={user.username === shareAccessOwner}
+                            onChange={(e) => setShareAccessDraft((prev) => ({
+                              ...prev,
+                              [user.username]: (e.target.value === "edit" ? "edit" : (e.target.value === "view" ? "view" : "")),
+                            }))}
+                          >
+                            <option value="">нет доступа</option>
+                            <option value="view">view</option>
+                            <option value="edit">edit</option>
+                          </select>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="toolbar">
+                      <TipButton tip="Сохранить права доступа к подписке" className="btn" onClick={() => void saveShareAccess()}>
+                        Сохранить доступ
+                      </TipButton>
+                    </div>
+                  </>
+                ) : null}
+              </section>
+            ) : null}
+          </>
         </Modal>
+      ) : null}
+      {showOverrides && overridesItem ? (
+        <OverridesModal item={overridesItem} onClose={() => setShowOverrides(false)} onNotify={notify} />
       ) : null}
       {showSubUsers && subUsersItem ? (
         <Modal onClose={() => setShowSubUsers(false)} title={`Пользователи: ${subUsersItem.title}`} showCloseButton>
@@ -2148,8 +2289,9 @@ export default function App() {
                       placeholder="Лимит пользователей (0 = без лимита)"
                       value={subUsersMax}
                       onChange={(e) => setSubUsersMax(e.target.value)}
+                      disabled={subUsersItem.permissions?.canEdit === false}
                     />
-                    <TipButton tip="Сохранить настройки" className="btn" onClick={() => void saveSubUsersPolicy()}>
+                    <TipButton tip="Сохранить настройки" className="btn" onClick={() => void saveSubUsersPolicy()} disabled={subUsersItem.permissions?.canEdit === false}>
                       Сохранить настройки
                     </TipButton>
                   </div>
@@ -2158,12 +2300,14 @@ export default function App() {
                     placeholder="Доступ к подписке заблокирован"
                     value={subUsersBlockedMessage}
                     onChange={(e) => setSubUsersBlockedMessage(e.target.value)}
+                    disabled={subUsersItem.permissions?.canEdit === false}
                   />
                   <label className="composer-label">Текст при превышении лимита пользователей</label>
                   <TextInput
                     placeholder="Достигнут лимит пользователей для этой подписки"
                     value={subUsersLimitMessage}
                     onChange={(e) => setSubUsersLimitMessage(e.target.value)}
+                    disabled={subUsersItem.permissions?.canEdit === false}
                   />
                 </section>
 
@@ -2185,11 +2329,12 @@ export default function App() {
                           <TipButton
                             tip={user.blocked ? "Разблокировать пользователя" : "Заблокировать пользователя"}
                             className="btn"
+                            disabled={subUsersItem.permissions?.canEdit === false}
                             onClick={() => void toggleSubUserBlocked(user.hwid, !user.blocked, user.blockReason)}
                           >
                             {user.blocked ? "Разблокировать" : "Блокировать"}
                           </TipButton>
-                          <TipButton tip="Удалить пользователя и историю" className="btn" onClick={() => void removeSubUser(user.hwid)}>
+                          <TipButton tip="Удалить пользователя и историю" className="btn" onClick={() => void removeSubUser(user.hwid)} disabled={subUsersItem.permissions?.canEdit === false}>
                             Удалить
                           </TipButton>
                         </div>

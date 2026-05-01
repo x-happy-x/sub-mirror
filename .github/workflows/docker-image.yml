@@ -32,7 +32,7 @@ jobs:
         working-directory: ./app
 
       - name: Run backend tests
-        run: node --test app/server.test.js
+        run: node --test app/*.test.js
 
       - name: Install frontend deps
         run: npm ci

@@ -18,7 +18,21 @@ export type FavoriteItem = {
   payload: SubscriptionPayload;
   labels: string[];
   shortId?: string;
+  permissions?: ShortLinkPermissions;
   ts: number;
+};
+
+export type ShortLinkPermissions = {
+  canView: boolean;
+  canEdit: boolean;
+  canManageAccess: boolean;
+  accessLevel: "" | "view" | "edit";
+};
+
+export type ShortLinkAccessGrant = {
+  username: string;
+  role: "user" | "admin";
+  accessLevel: "view" | "edit";
 };
 
 export type ImportedProxyItem = {

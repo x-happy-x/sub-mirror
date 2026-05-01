@@ -10,3 +10,8 @@ frontend/tsconfig.tsbuildinfo
 # IDE/secrets
 .idea/
 homeserver
+.codex
+.tmp-test-data/
+sub-mirror.zip
+sub.json
+bypass-all.txt

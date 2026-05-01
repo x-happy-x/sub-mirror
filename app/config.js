@@ -8,6 +8,7 @@ const CONVERTER_URL = process.env.CONVERTER_URL || "";
 const SOURCE_URL = process.env.SOURCE_URL || "http://web/source.txt";
 const PORT = Number(process.env.PORT || "8787");
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
+const MAX_SNAPSHOTS_PER_FEED = Math.max(1, Number(process.env.MAX_SNAPSHOTS_PER_FEED || "10") || 10);
 const PROFILE_DIR_ENV = process.env.PROFILE_DIR || "";
 const PROFILE_FALLBACK_DIR = path.resolve(process.cwd(), "resources/profiles");
 const PROFILE_ROOT_DIRS = PROFILE_DIR_ENV
@@ -53,6 +54,7 @@ export {
   SOURCE_URL,
   PORT,
   PUBLIC_BASE_URL,
+  MAX_SNAPSHOTS_PER_FEED,
   PROFILE_ROOT_DIRS,
   HEADER_POLICY_DEFAULT,
   OUTPUT_RAW,

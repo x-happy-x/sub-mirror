@@ -1,4 +1,15 @@
-import type { AuthUser, ImportedProxyItem, MockSource, ProfileCatalog, ShortLinkUsersData, SubTestResponse, SubscriptionPayload, UACatalog } from "../types";
+import type {
+  AuthUser,
+  ImportedProxyItem,
+  MockSource,
+  ProfileCatalog,
+  ShortLinkAccessGrant,
+  ShortLinkPermissions,
+  ShortLinkUsersData,
+  SubTestResponse,
+  SubscriptionPayload,
+  UACatalog,
+} from "../types";
 import type { FavoriteItem } from "../types";
 
 const PARAM_KEYS = ["sub_url", "endpoint", "output", "app", "device", "profile", "profiles", "hwid"] as const;
@@ -36,12 +47,13 @@ export async function logout(): Promise<void> {
   if (!resp.ok || !json.ok) throw new Error(json.error || "logout failed");
 }
 
-export async function createShortLink(payload: SubscriptionPayload): Promise<{ id: string; shortUrl: string }> {
+export async function createShortLink(payload: SubscriptionPayload, title = ""): Promise<{ id: string; shortUrl: string }> {
   const body: Record<string, string> = {};
   for (const key of PARAM_KEYS) {
     const v = payload[key];
     if (v) body[key] = String(v);
   }
+  if (title.trim()) body.title = title.trim();
   const resp = await fetch("/api/short-links", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -52,12 +64,13 @@ export async function createShortLink(payload: SubscriptionPayload): Promise<{ i
   return { id: json.link.id, shortUrl: json.urls.shortUrl };
 }
 
-export async function updateShortLink(id: string, payload: SubscriptionPayload): Promise<void> {
+export async function updateShortLink(id: string, payload: SubscriptionPayload, title = ""): Promise<void> {
   const body: Record<string, string> = {};
   for (const key of PARAM_KEYS) {
     const v = payload[key];
     if (v) body[key] = String(v);
   }
+  if (title.trim()) body.title = title.trim();
   const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -72,6 +85,79 @@ export async function fetchShortLink(id: string): Promise<SubscriptionPayload> {
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "short-link fetch failed");
   return json.link.params as SubscriptionPayload;
+}
+
+export async function fetchShortLinkAccess(id: string): Promise<{ ownerUsername: string; grants: ShortLinkAccessGrant[] }> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/access`);
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link access fetch failed");
+  return {
+    ownerUsername: String(json.ownerUsername || ""),
+    grants: Array.isArray(json.grants)
+      ? json.grants.map((row: unknown) => {
+        const item = (row || {}) as Record<string, unknown>;
+        return {
+          username: String(item.username || ""),
+          role: String(item.role || "user") === "admin" ? "admin" : "user",
+          accessLevel: String(item.accessLevel || "") === "edit" ? "edit" : "view",
+        } as ShortLinkAccessGrant;
+      })
+      : [],
+  };
+}
+
+export async function updateShortLinkAccess(id: string, grants: ShortLinkAccessGrant[]): Promise<void> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/access`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ grants }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link access update failed");
+}
+
+export async function fetchShortLinkOverrides(id: string): Promise<{ overrides: Record<string, unknown>; overrideVersion: number }> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/overrides`);
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link overrides fetch failed");
+  return {
+    overrides: (json.overrides && typeof json.overrides === "object") ? json.overrides as Record<string, unknown> : {},
+    overrideVersion: Number(json.overrideVersion || 0),
+  };
+}
+
+export async function updateShortLinkOverrides(id: string, overrides: Record<string, unknown>): Promise<{ overrideVersion: number }> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/overrides`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overrides: overrides && typeof overrides === "object" ? overrides : {} }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link overrides update failed");
+  return {
+    overrideVersion: Number(json.overrideVersion || 0),
+  };
+}
+
+export async function previewShortLinkOverrides(
+  id: string,
+  overrides: Record<string, unknown>,
+): Promise<{ output: string; contentType: string; conversion: string; servers: string[]; body: string; bodyBytes: number }> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/overrides/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overrides: overrides && typeof overrides === "object" ? overrides : {} }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link overrides preview failed");
+  return {
+    output: String(json.output || ""),
+    contentType: String(json.contentType || ""),
+    conversion: String(json.conversion || ""),
+    servers: Array.isArray(json.servers) ? json.servers.map((value: unknown) => String(value || "")) : [],
+    body: String(json.body || ""),
+    bodyBytes: Number(json.bodyBytes || 0),
+  };
 }
 
 export async function createLocalSource(input: { name?: string; body: string }): Promise<{ id: string; subUrl: string; body: string; name: string }> {
@@ -480,7 +566,22 @@ export async function fetchFavorites(): Promise<FavoriteItem[]> {
   const resp = await fetch("/api/favorites");
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "favorites fetch failed");
-  return Array.isArray(json.favorites) ? json.favorites as FavoriteItem[] : [];
+  return Array.isArray(json.favorites)
+    ? json.favorites.map((entry: unknown) => {
+      const item = (entry || {}) as FavoriteItem & { permissions?: ShortLinkPermissions };
+      const permissions = item.permissions && typeof item.permissions === "object"
+        ? {
+          canView: Boolean(item.permissions.canView),
+          canEdit: Boolean(item.permissions.canEdit),
+          canManageAccess: Boolean(item.permissions.canManageAccess),
+          accessLevel: String(item.permissions.accessLevel || "") === "edit"
+            ? "edit"
+            : (String(item.permissions.accessLevel || "") === "view" ? "view" : ""),
+        } as ShortLinkPermissions
+        : undefined;
+      return { ...item, permissions };
+    })
+    : [];
 }
 
 export async function saveFavorites(list: FavoriteItem[]): Promise<FavoriteItem[]> {

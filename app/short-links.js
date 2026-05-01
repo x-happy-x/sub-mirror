@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import {
   createShortLinkRow,
   getShortLinkRow,
+  getShortLinkPermissions,
   updateShortLinkRow,
 } from "./sqlite-store.js";
 
@@ -32,38 +33,59 @@ async function generateId() {
 }
 
 async function createShortLink(params) {
-  const sanitized = sanitizeParams(params);
+  const sanitized = sanitizeParams(params?.params || params);
   if (!sanitized.sub_url) {
     return { ok: false, status: 400, error: "sub_url is required" };
   }
   const id = await generateId();
-  const link = await createShortLinkRow(id, sanitized);
+  const link = await createShortLinkRow(id, {
+    params: sanitized,
+    title: params?.title,
+    ownerUsername: params?.ownerUsername,
+  });
   return { ok: true, link };
 }
 
-async function getShortLink(id) {
+async function getShortLink(id, actor = null) {
   const token = String(id || "").trim();
   if (!/^[A-Za-z0-9_-]+$/.test(token)) {
     return { ok: false, status: 400, error: "invalid short link id" };
   }
-  const link = await getShortLinkRow(token);
-  if (!link) {
+  const permission = await getShortLinkPermissions(token, actor);
+  if (!permission?.link) {
     return { ok: false, status: 404, error: "short link not found" };
   }
-  return { ok: true, link };
+  if (!permission.canView) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
+  return {
+    ok: true,
+    link: permission.link,
+    permissions: {
+      canView: permission.canView,
+      canEdit: permission.canEdit,
+      canManageAccess: permission.canManageAccess,
+      accessLevel: permission.accessLevel || "",
+    },
+  };
 }
 
-async function updateShortLink(id, params) {
-  const existing = await getShortLink(id);
+async function updateShortLink(id, params, actor = null) {
+  const existing = await getShortLink(id, actor);
   if (!existing.ok) return existing;
+  if (!existing.permissions?.canEdit) {
+    return { ok: false, status: 403, error: "forbidden" };
+  }
 
-  const sanitized = sanitizeParams(params);
+  const sanitized = sanitizeParams(params?.params || params);
   if (!sanitized.sub_url && !existing.link.params.sub_url) {
     return { ok: false, status: 400, error: "sub_url is required" };
   }
 
   const token = existing.link.id;
-  let current = await updateShortLinkRow(token, sanitized);
+  let current = await updateShortLinkRow(token, sanitized, {
+    title: params?.title,
+  });
   if (!current) {
     return { ok: false, status: 404, error: "short link not found" };
   }

@@ -25,6 +25,7 @@ import {
   getAuthSession,
   deleteAuthSession,
   incrementShortLinkHits,
+  getShortLinkPermissions,
   hasUsers,
   verifyUserCredentials,
   listUsers as listAuthUsers,
@@ -32,12 +33,19 @@ import {
   updateUser as updateAuthUser,
   deleteUser as deleteAuthUser,
   getFavoritesRow,
+  listShortLinkAccess,
+  replaceShortLinkAccess,
   setFavoritesRow,
   recordShortLinkUserVisit,
   listShortLinkUsers,
   updateShortLinkUserPolicy,
   setShortLinkUserBlocked,
   deleteShortLinkUser,
+  buildSubscriptionFeedKey,
+  getSubscriptionFeedByKey,
+  getSubscriptionOverridesForFeed,
+  upsertSubscriptionFeed,
+  upsertSubscriptionOverrides,
 } from "./sqlite-store.js";
 import {
   createMockSource,
@@ -63,9 +71,13 @@ import {
   resolveRequestConfig,
   produceOutput,
   fetchWithNode,
+  applyOverridesToNormalized,
   handleSubscription,
   handleLast,
   handleEcho,
+  loadLatestStoredSnapshotBundle,
+  persistSuccessfulSourceSnapshot,
+  renderOutputFromNormalized,
   serveStaticFile,
 } from "./subscription.js";
 import {
@@ -208,6 +220,41 @@ async function requireAdmin(req, res) {
     return null;
   }
   return state;
+}
+
+function authActorFromState(state) {
+  if (!state?.enabled) return null;
+  if (!state?.authenticated || !state?.user) return { username: "", role: "user" };
+  return {
+    username: String(state.user.username || ""),
+    role: String(state.user.role || "user"),
+  };
+}
+
+async function requireShortLinkPermission(req, res, id, mode = "view") {
+  const state = await getAuthState(req);
+  if (state.enabled && !state.authenticated) {
+    sendJson(res, 401, { ok: false, error: "unauthorized", authRequired: true });
+    return null;
+  }
+  const permission = await getShortLinkPermissions(id, authActorFromState(state));
+  if (!permission?.link) {
+    sendJson(res, 404, { ok: false, error: "short link not found" });
+    return null;
+  }
+  if (mode === "manage" && !permission.canManageAccess) {
+    sendJson(res, 403, { ok: false, error: "forbidden" });
+    return null;
+  }
+  if (mode === "edit" && !permission.canEdit) {
+    sendJson(res, 403, { ok: false, error: "forbidden" });
+    return null;
+  }
+  if (mode === "view" && !permission.canView) {
+    sendJson(res, 403, { ok: false, error: "forbidden" });
+    return null;
+  }
+  return { state, permission };
 }
 
 async function readRawBody(req, maxBytes = 128 * 1024) {
@@ -743,12 +790,17 @@ async function handleSubscriptionTest(req, res) {
 
 async function handleCreateShortLink(req, res) {
   try {
+    const state = await getAuthState(req);
     const body = await readJsonBody(req);
     const picked = {};
     for (const key of PARAM_KEYS) {
       if (body[key] !== undefined) picked[key] = body[key];
     }
-    const created = await createShortLink(picked);
+    const created = await createShortLink({
+      params: picked,
+      title: body?.title,
+      ownerUsername: state.user?.username || "",
+    });
     if (!created.ok) {
       sendJson(res, created.status || 400, created);
       return;
@@ -765,12 +817,16 @@ async function handleCreateShortLink(req, res) {
 
 async function handleUpdateShortLink(req, res, id) {
   try {
+    const state = await getAuthState(req);
     const body = await readJsonBody(req);
     const picked = {};
     for (const key of PARAM_KEYS) {
       if (body[key] !== undefined) picked[key] = body[key];
     }
-    const updated = await updateShortLink(id, sanitizeParams(picked));
+    const updated = await updateShortLink(id, {
+      params: sanitizeParams(picked),
+      title: body?.title,
+    }, authActorFromState(state));
     if (!updated.ok) {
       sendJson(res, updated.status || 400, updated);
       return;
@@ -786,7 +842,8 @@ async function handleUpdateShortLink(req, res, id) {
 }
 
 async function handleGetShortLink(req, res, id) {
-  const found = await getShortLink(id);
+  const state = await getAuthState(req);
+  const found = await getShortLink(id, authActorFromState(state));
   if (!found.ok) {
     sendJson(res, found.status || 404, found);
     return;
@@ -794,8 +851,173 @@ async function handleGetShortLink(req, res, id) {
   sendJson(res, 200, {
     ok: true,
     link: found.link,
+    permissions: found.permissions,
     urls: shortLinkPublicUrls(req, found.link.id, found.link.params),
   });
+}
+
+function buildFeedKeyFromShortLinkParams(params) {
+  const requestUrl = new URL("http://localhost/sub");
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === undefined || value === null || value === "") continue;
+    requestUrl.searchParams.set(key, String(value));
+  }
+  const config = resolveRequestConfig(requestUrl, {});
+  if (!config.ok) throw new Error(config.error || "invalid request config");
+  return buildSubscriptionFeedKey({
+    subUrl: config.subUrl,
+    app: config.app,
+    device: config.device,
+    profiles: config.profileNames,
+    hwid: String(config.forwardHeaders?.["x-hwid"] || "").trim(),
+  });
+}
+
+async function handleGetShortLinkOverrides(req, res, id) {
+  const access = await requireShortLinkPermission(req, res, id, "view");
+  if (!access) return;
+  try {
+    const found = { link: access.permission.link };
+    const feedKey = buildFeedKeyFromShortLinkParams(found.link.params || {});
+    const feed = await getSubscriptionFeedByKey(feedKey);
+    const overrides = feed ? await getSubscriptionOverridesForFeed(feed.id) : null;
+    sendJson(res, 200, {
+      ok: true,
+      shortLinkId: found.link.id,
+      feed: feed ? {
+        id: feed.id,
+        feedKey: feed.feedKey,
+        subUrl: feed.subUrl,
+        app: feed.app,
+        device: feed.device,
+        profileNames: feed.profileNames,
+        hwid: feed.hwid,
+      } : null,
+      overrides: overrides ? overrides.overrides : {},
+      overrideVersion: overrides?.version || 0,
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to resolve overrides" });
+  }
+}
+
+async function handlePutShortLinkOverrides(req, res, id) {
+  const access = await requireShortLinkPermission(req, res, id, "edit");
+  if (!access) return;
+  try {
+    const found = { link: access.permission.link };
+    const feedKey = buildFeedKeyFromShortLinkParams(found.link.params || {});
+    const configUrl = new URL("http://localhost/sub");
+    for (const [key, value] of Object.entries(found.link.params || {})) {
+      if (value === undefined || value === null || value === "") continue;
+      configUrl.searchParams.set(key, String(value));
+    }
+    const config = resolveRequestConfig(configUrl, {});
+    if (!config.ok) {
+      sendJson(res, config.status || 400, { ok: false, error: config.error || "invalid request config" });
+      return;
+    }
+    const feed = await getSubscriptionFeedByKey(feedKey) || await upsertSubscriptionFeed({
+      feedKey,
+      subUrl: config.subUrl,
+      app: config.app,
+      device: config.device,
+      profiles: config.profileNames,
+      hwid: String(config.forwardHeaders?.["x-hwid"] || "").trim(),
+    });
+    const body = await readJsonBody(req, 2 * 1024 * 1024);
+    const overrides = body?.overrides && typeof body.overrides === "object" && !Array.isArray(body.overrides)
+      ? body.overrides
+      : {};
+    const saved = await upsertSubscriptionOverrides(feed.id, overrides);
+    sendJson(res, 200, {
+      ok: true,
+      shortLinkId: found.link.id,
+      feed: {
+        id: feed.id,
+        feedKey: feed.feedKey,
+      },
+      overrides: saved.overrides,
+      overrideVersion: saved.version,
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to save overrides" });
+  }
+}
+
+async function handlePreviewShortLinkOverrides(req, res, id) {
+  const access = await requireShortLinkPermission(req, res, id, "view");
+  if (!access) return;
+  try {
+    const found = { link: access.permission.link };
+    const params = found.link.params || {};
+    const body = await readJsonBody(req, 512 * 1024);
+    const overrides = body?.overrides && typeof body.overrides === "object" && !Array.isArray(body.overrides)
+      ? body.overrides
+      : {};
+    const configUrl = new URL("http://localhost/sub");
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value === undefined || value === null || value === "") continue;
+      configUrl.searchParams.set(key, String(value));
+    }
+    const config = resolveRequestConfig(configUrl, {});
+    if (!config.ok) {
+      sendJson(res, config.status || 400, { ok: false, error: config.error || "invalid request config" });
+      return;
+    }
+    let bundle = await loadLatestStoredSnapshotBundle({
+      subUrl: config.subUrl,
+      app: config.app,
+      device: config.device,
+      profileNames: config.profileNames,
+      forwardHeaders: config.forwardHeaders,
+    });
+    if (!bundle?.normalizedSnapshot?.normalizedPath) {
+      const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
+      await persistSuccessfulSourceSnapshot({
+        subUrl: config.subUrl,
+        app: config.app,
+        device: config.device,
+        profileNames: config.profileNames,
+        forwardHeaders: config.forwardHeaders,
+        fetched,
+        route: "/api/short-links/:id/overrides/preview",
+        requestedOutput: normalizeOutput(String(params.output || "yml")) || "clash",
+        requesterId: `short-link-preview:${found.link.id}`,
+      });
+      bundle = await loadLatestStoredSnapshotBundle({
+        subUrl: config.subUrl,
+        app: config.app,
+        device: config.device,
+        profileNames: config.profileNames,
+        forwardHeaders: config.forwardHeaders,
+      });
+    }
+    if (!bundle?.normalizedSnapshot?.normalizedPath) {
+      sendJson(res, 404, { ok: false, error: "no stored snapshot available for preview" });
+      return;
+    }
+    const output = normalizeOutput(String(params.output || "yml")) || "clash";
+    const normalized = JSON.parse(fs.readFileSync(bundle.normalizedSnapshot.normalizedPath, "utf8"));
+    const effective = applyOverridesToNormalized(normalized, overrides);
+    const rendered = await renderOutputFromNormalized(effective, output, { app: String(params.app || "") });
+    if (!rendered.ok) {
+      sendJson(res, 400, { ok: false, error: rendered.error || "preview render failed" });
+      return;
+    }
+    const previewBody = String(rendered.body || "");
+    sendJson(res, 200, {
+      ok: true,
+      output,
+      contentType: rendered.contentType || "",
+      conversion: rendered.conversion || "",
+      servers: parseServersFromText(previewBody).slice(0, 200),
+      body: previewBody,
+      bodyBytes: Buffer.byteLength(previewBody, "utf8"),
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to render preview" });
+  }
 }
 
 async function handleCreateLocalSource(req, res) {
@@ -855,13 +1077,10 @@ async function handleParseBulkImport(req, res) {
 }
 
 async function handleGetShortLinkUsers(req, res, id) {
-  const found = await getShortLink(id);
-  if (!found.ok) {
-    sendJson(res, found.status || 404, found);
-    return;
-  }
+  const access = await requireShortLinkPermission(req, res, id, "view");
+  if (!access) return;
   try {
-    const data = await listShortLinkUsers(found.link.id);
+    const data = await listShortLinkUsers(access.permission.link.id);
     sendJson(res, 200, { ok: true, users: data });
   } catch (e) {
     sendJson(res, 500, { ok: false, error: e?.message || "failed to load short link users" });
@@ -869,14 +1088,11 @@ async function handleGetShortLinkUsers(req, res, id) {
 }
 
 async function handleUpdateShortLinkUsersPolicy(req, res, id) {
-  const found = await getShortLink(id);
-  if (!found.ok) {
-    sendJson(res, found.status || 404, found);
-    return;
-  }
+  const access = await requireShortLinkPermission(req, res, id, "edit");
+  if (!access) return;
   try {
     const body = await readJsonBody(req);
-    const updated = await updateShortLinkUserPolicy(found.link.id, {
+    const updated = await updateShortLinkUserPolicy(access.permission.link.id, {
       maxUsers: body?.maxUsers,
       blockedMessage: body?.blockedMessage,
       limitMessage: body?.limitMessage,
@@ -888,11 +1104,8 @@ async function handleUpdateShortLinkUsersPolicy(req, res, id) {
 }
 
 async function handleUpdateShortLinkUser(req, res, id, hwidToken) {
-  const found = await getShortLink(id);
-  if (!found.ok) {
-    sendJson(res, found.status || 404, found);
-    return;
-  }
+  const access = await requireShortLinkPermission(req, res, id, "edit");
+  if (!access) return;
   let hwid = "";
   try {
     hwid = decodeURIComponent(String(hwidToken || ""));
@@ -902,7 +1115,7 @@ async function handleUpdateShortLinkUser(req, res, id, hwidToken) {
   try {
     const body = await readJsonBody(req);
     const updated = await setShortLinkUserBlocked(
-      found.link.id,
+      access.permission.link.id,
       hwid,
       Boolean(body?.blocked),
       String(body?.blockReason || ""),
@@ -918,11 +1131,8 @@ async function handleUpdateShortLinkUser(req, res, id, hwidToken) {
 }
 
 async function handleDeleteShortLinkUser(req, res, id, hwidToken) {
-  const found = await getShortLink(id);
-  if (!found.ok) {
-    sendJson(res, found.status || 404, found);
-    return;
-  }
+  const access = await requireShortLinkPermission(req, res, id, "edit");
+  if (!access) return;
   let hwid = "";
   try {
     hwid = decodeURIComponent(String(hwidToken || ""));
@@ -930,7 +1140,7 @@ async function handleDeleteShortLinkUser(req, res, id, hwidToken) {
     hwid = String(hwidToken || "");
   }
   try {
-    await deleteShortLinkUser(found.link.id, hwid);
+    await deleteShortLinkUser(access.permission.link.id, hwid);
     sendJson(res, 200, { ok: true });
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e?.message || "failed to delete user" });
@@ -1415,6 +1625,67 @@ async function handleAdminUsersDelete(req, res, username) {
   sendJson(res, 200, { ok: true });
 }
 
+async function handleGetShortLinkAccess(req, res, id) {
+  const access = await requireShortLinkPermission(req, res, id, "manage");
+  if (!access) return;
+  const grants = await listShortLinkAccess(id);
+  sendJson(res, 200, {
+    ok: true,
+    shortLinkId: access.permission.link.id,
+    ownerUsername: access.permission.link.ownerUsername || "",
+    grants,
+  });
+}
+
+async function handlePutShortLinkAccess(req, res, id) {
+  const access = await requireShortLinkPermission(req, res, id, "manage");
+  if (!access) return;
+  try {
+    const body = await readJsonBody(req);
+    const ownerUsername = String(access.permission.link.ownerUsername || "").trim().toLowerCase();
+    const grantsInput = Array.isArray(body?.grants) ? body.grants : [];
+    const grants = grantsInput.filter((item) => String(item?.username || "").trim().toLowerCase() !== ownerUsername);
+    const saved = await replaceShortLinkAccess(id, grants);
+    sendJson(res, 200, {
+      ok: true,
+      shortLinkId: access.permission.link.id,
+      ownerUsername,
+      grants: saved,
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to update access" });
+  }
+}
+
+async function filterFavoritesByAccess(list, actor) {
+  const input = Array.isArray(list) ? list : [];
+  const output = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object") continue;
+    const shortId = String(item.shortId || "").trim();
+    if (!shortId) {
+      output.push({
+        ...item,
+        permissions: { canView: true, canEdit: true, canManageAccess: false, accessLevel: "edit" },
+      });
+      continue;
+    }
+    const permission = await getShortLinkPermissions(shortId, actor);
+    if (permission?.canView) {
+      output.push({
+        ...item,
+        permissions: {
+          canView: permission.canView,
+          canEdit: permission.canEdit,
+          canManageAccess: permission.canManageAccess,
+          accessLevel: permission.accessLevel || "",
+        },
+      });
+    }
+  }
+  return output;
+}
+
 async function resolveFavoritesAccountKey(req) {
   const state = await getAuthState(req);
   if (state.enabled) return String(state.user?.username || "").trim();
@@ -1427,7 +1698,8 @@ async function handleFavoritesGet(req, res) {
     sendJson(res, 401, { ok: false, error: "unauthorized", authRequired: true });
     return;
   }
-  const favorites = await getFavoritesRow(key);
+  const state = await getAuthState(req);
+  const favorites = await filterFavoritesByAccess(await getFavoritesRow(key), authActorFromState(state));
   sendJson(res, 200, { ok: true, favorites });
 }
 
@@ -1438,9 +1710,10 @@ async function handleFavoritesPut(req, res) {
     return;
   }
   try {
+    const state = await getAuthState(req);
     const body = await readJsonBody(req, 2 * 1024 * 1024);
     const favorites = Array.isArray(body?.favorites) ? body.favorites : [];
-    const saved = await setFavoritesRow(key, favorites);
+    const saved = await setFavoritesRow(key, await filterFavoritesByAccess(favorites, authActorFromState(state)));
     sendJson(res, 200, { ok: true, favorites: saved });
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
@@ -1454,6 +1727,9 @@ const server = http.createServer(async (req, res) => {
   const publicShortApiMatch = routePath.match(/^\/api\/public-short-links\/([A-Za-z0-9_-]+)$/);
   const publicShortMetaApiMatch = routePath.match(/^\/api\/public-short-links\/([A-Za-z0-9_-]+)\/meta$/);
   const shortApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)$/);
+  const shortAccessApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/access$/);
+  const shortOverridesApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/overrides$/);
+  const shortOverridesPreviewApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/overrides\/preview$/);
   const shortUsersApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users$/);
   const shortUserApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users\/([^/]+)$/);
   const localSourceApiMatch = routePath.match(/^\/api\/local-sources\/([A-Za-z0-9_-]+)$/);
@@ -1627,6 +1903,32 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && shortApiMatch) {
     if (!(await requireApiAuth(req, res))) return;
     await handleGetShortLink(req, res, shortApiMatch[1]);
+    return;
+  }
+  if (req.method === "GET" && shortAccessApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    await handleGetShortLinkAccess(req, res, shortAccessApiMatch[1]);
+    return;
+  }
+  if (req.method === "PUT" && shortAccessApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    await handlePutShortLinkAccess(req, res, shortAccessApiMatch[1]);
+    return;
+  }
+  if (req.method === "GET" && shortOverridesApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    await handleGetShortLinkOverrides(req, res, shortOverridesApiMatch[1]);
+    return;
+  }
+  if (req.method === "PUT" && shortOverridesApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    await handlePutShortLinkOverrides(req, res, shortOverridesApiMatch[1]);
+    return;
+  }
+
+  if (req.method === "POST" && shortOverridesPreviewApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    await handlePreviewShortLinkOverrides(req, res, shortOverridesPreviewApiMatch[1]);
     return;
   }
   if (req.method === "GET" && shortUsersApiMatch) {

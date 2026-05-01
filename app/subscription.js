@@ -23,6 +23,23 @@ import {
 } from "./config.js";
 import { resolveLocalSourceFilePath } from "./local-sources.js";
 import { getMergedSource } from "./local-sources.js";
+import { parseBulkProxyText } from "./proxy-import.js";
+import {
+  buildSubscriptionFeedKey,
+  getSubscriptionFeedByKey,
+  upsertSubscriptionFeed,
+  createSourceSnapshot,
+  createNormalizedSnapshot,
+  getLatestSourceSnapshotForFeed,
+  getNormalizedSnapshotBySourceSnapshotId,
+  getSubscriptionOverridesForFeed,
+} from "./sqlite-store.js";
+import {
+  writeRawSourceSnapshotBody,
+  writeNormalizedSnapshotFile,
+  readSnapshotFile,
+  pruneStoredSnapshots,
+} from "./source-snapshots.js";
 
 const UA_CATALOG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../resources/ua-catalog.json");
 const LOCAL_SOURCE_ROOTS = [
@@ -91,6 +108,520 @@ function decodeBase64IfNeeded(text) {
   }
 }
 
+function detectSourceFormat(rawText, contentType = "") {
+  const text = String(rawText || "").trim();
+  if (!text) return "empty";
+  const ct = String(contentType || "").toLowerCase();
+  if (text.startsWith("<!doctype html") || text.startsWith("<html") || ct.includes("text/html")) return "html";
+  if (ct.includes("application/json")) return "json";
+  if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
+    try {
+      JSON.parse(text);
+      return "json";
+    } catch {
+      // continue
+    }
+  }
+  if (/^\s*proxies\s*:\s*$/m.test(text)) return "yml";
+  if (/^(vmess|vless|ss|ssr|trojan):\/\//m.test(text)) return "raw";
+  if (/^[A-Za-z0-9+/=\r\n]+$/.test(text) && text.length > 120) {
+    const decoded = decodeBase64IfNeeded(text);
+    if (decoded !== text && /^(vmess|vless|ss|ssr|trojan):\/\//m.test(decoded)) return "raw(base64)";
+  }
+  return "unknown";
+}
+
+function parseJsonText(rawText, fallback = null) {
+  try {
+    return JSON.parse(String(rawText || ""));
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeModelNode(item, index, sourceFormat) {
+  return {
+    id: `node-${String(index + 1).padStart(4, "0")}`,
+    name: String(item?.name || `node-${index + 1}`),
+    enabled: true,
+    type: String(item?.type || "").toLowerCase(),
+    endpoint: {
+      host: String(item?.server || ""),
+      port: Number(item?.port || 0),
+    },
+    auth: {
+      uuid: String(item?.uuid || ""),
+      password: String(item?.password || ""),
+      method: String(item?.transport?.method || ""),
+      alterId: String(item?.transport?.aid || ""),
+      flow: String(item?.flow || ""),
+    },
+    transport: {
+      network: String(item?.network || ""),
+      path: String(item?.path || ""),
+      host: String(item?.host || ""),
+      serviceName: String(item?.serviceName || ""),
+      headerType: String(item?.transport?.headerType || ""),
+      authority: String(item?.transport?.authority || ""),
+      mode: String(item?.transport?.mode || ""),
+      alpn: String(item?.transport?.alpn || ""),
+      seed: String(item?.transport?.seed || ""),
+      quicSecurity: String(item?.transport?.quicSecurity || ""),
+      key: String(item?.transport?.key || ""),
+    },
+    security: {
+      mode: String(item?.security || ""),
+      sni: String(item?.sni || item?.servername || ""),
+      fp: String(item?.clientFingerprint || item?.fp || ""),
+      pbk: String(item?.publicKey || item?.pbk || ""),
+      sid: String(item?.shortId || item?.sid || ""),
+    },
+    origin: {
+      sourceFormat,
+      uri: String(item?.uri || ""),
+      servername: String(item?.servername || ""),
+      rawType: String(item?.type || ""),
+    },
+  };
+}
+
+function buildNormalizedNodesFromRawText(rawText, sourceFormat) {
+  return parseBulkProxyText(rawText).map((item, index) => normalizeModelNode(item, index, sourceFormat));
+}
+
+function buildNormalizedModelFromJson(rawText) {
+  const parsed = parseJsonText(rawText, null);
+  const configs = Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") : (parsed && typeof parsed === "object" ? [parsed] : []);
+  const rawUris = extractRawUrisFromJsonConfig(configs);
+  const nodes = rawUris ? buildNormalizedNodesFromRawText(rawUris, "json") : [];
+  const topology = {
+    balancers: configs.flatMap((config) => Array.isArray(config?.routing?.balancers) ? config.routing.balancers : []),
+    observatory: configs
+      .map((config) => config?.observatory)
+      .filter((item) => item && typeof item === "object"),
+    selectors: configs.flatMap((config) => Array.isArray(config?.observatory?.subjectSelector) ? [config.observatory.subjectSelector] : []),
+  };
+  const policy = {
+    routingRules: configs.flatMap((config) => Array.isArray(config?.routing?.rules) ? config.routing.rules : []),
+    dns: configs
+      .map((config) => config?.dns)
+      .filter((item) => item && typeof item === "object"),
+    inbounds: configs.flatMap((config) => Array.isArray(config?.inbounds) ? config.inbounds : []),
+    outbounds: configs.flatMap((config) => Array.isArray(config?.outbounds) ? config.outbounds : []),
+  };
+  return {
+    model: {
+      schemaVersion: 1,
+      meta: {
+        sourceFormat: "json",
+        parserVersion: "normalized-v1",
+      },
+      nodes,
+      topology,
+      policy,
+      extensions: {
+        xray: {
+          configCount: configs.length,
+          remarks: configs.map((config) => String(config?.remarks || "")).filter(Boolean),
+          configs,
+        },
+      },
+    },
+    warnings: [],
+    lossFlags: [],
+  };
+}
+
+function buildNormalizedModelFromYaml(rawText) {
+  const rawUris = convertClashYamlToRawUris(rawText);
+  const nodes = rawUris ? buildNormalizedNodesFromRawText(rawUris, "yml") : [];
+  const proxyGroups = parseClashProxyGroups(rawText);
+  const rules = parseClashRules(rawText);
+  const dnsSection = extractTopLevelYamlSection(rawText, "dns");
+  return {
+    model: {
+      schemaVersion: 1,
+      meta: {
+        sourceFormat: "yml",
+        parserVersion: "normalized-v1",
+        fullClashConfig: looksLikeFullClashConfig(rawText),
+      },
+      nodes,
+      topology: {
+        proxyGroups,
+      },
+      policy: {
+        rules,
+        dns: dnsSection ? { raw: dnsSection } : {},
+      },
+      extensions: {
+        clash: {
+          proxyCount: nodes.length,
+          providerStyle: looksLikeClashProviderYaml(rawText),
+          originalText: String(rawText || ""),
+        },
+      },
+    },
+    warnings: nodes.length > 0 ? [] : ["no-nodes-parsed-from-yaml"],
+    lossFlags: [],
+  };
+}
+
+function buildNormalizedModelFromRaw(rawText, sourceFormat) {
+  const normalizedRaw = sourceFormat === "raw(base64)" ? decodeBase64IfNeeded(rawText) : rawText;
+  const nodes = buildNormalizedNodesFromRawText(normalizedRaw, sourceFormat);
+  return {
+    model: {
+      schemaVersion: 1,
+      meta: {
+        sourceFormat,
+        parserVersion: "normalized-v1",
+      },
+      nodes,
+      topology: {},
+      policy: {},
+      extensions: {
+        raw: {
+          lineCount: extractSubscriptionLines(normalizedRaw).length,
+        },
+      },
+    },
+    warnings: nodes.length > 0 ? [] : ["no-nodes-parsed-from-raw"],
+    lossFlags: [],
+  };
+}
+
+function buildNormalizedModelFromSource(rawText, contentType = "") {
+  const sourceFormat = detectSourceFormat(rawText, contentType);
+  if (sourceFormat === "json") return { sourceFormat, ...buildNormalizedModelFromJson(rawText) };
+  if (sourceFormat === "yml") return { sourceFormat, ...buildNormalizedModelFromYaml(rawText) };
+  if (sourceFormat === "raw" || sourceFormat === "raw(base64)") {
+    return { sourceFormat, ...buildNormalizedModelFromRaw(rawText, sourceFormat) };
+  }
+  return {
+    sourceFormat,
+    model: {
+      schemaVersion: 1,
+      meta: {
+        sourceFormat,
+        parserVersion: "normalized-v1",
+      },
+      nodes: [],
+      topology: {},
+      policy: {},
+      extensions: {
+        unknown: {
+          contentType: String(contentType || ""),
+        },
+      },
+    },
+    warnings: ["unsupported-source-format"],
+    lossFlags: sourceFormat === "unknown" ? ["unknown-source-format"] : [],
+  };
+}
+
+function sourceFormatMatchesOutput(sourceFormat, output) {
+  const format = String(sourceFormat || "").trim().toLowerCase();
+  const target = String(output || "").trim().toLowerCase();
+  if (!format || !target) return false;
+  if ((format === "yml" || format === "yaml") && target === OUTPUT_CLASH) return true;
+  if (format === "json" && target === OUTPUT_JSON) return true;
+  if (format === "raw" && target === OUTPUT_RAW) return true;
+  if (format === "raw(base64)" && target === OUTPUT_RAW_BASE64) return true;
+  return false;
+}
+
+function hasMeaningfulOverrides(overrides) {
+  if (!overrides || typeof overrides !== "object") return false;
+  return Object.keys(overrides).length > 0;
+}
+
+function applyNodeOverrides(node, override = {}) {
+  const next = JSON.parse(JSON.stringify(node || {}));
+  if (typeof override.name === "string" && override.name.trim()) next.name = override.name.trim();
+  if (typeof override.enabled === "boolean") next.enabled = override.enabled;
+  if (typeof override.host === "string") next.endpoint.host = override.host.trim();
+  if (override.port !== undefined && override.port !== null && Number.isFinite(Number(override.port))) {
+    next.endpoint.port = Math.max(0, Number(override.port));
+  }
+  if (typeof override.uuid === "string") next.auth.uuid = override.uuid.trim();
+  if (typeof override.password === "string") next.auth.password = override.password;
+  if (typeof override.network === "string") next.transport.network = override.network.trim();
+  if (typeof override.path === "string") next.transport.path = override.path;
+  if (typeof override.hostHeader === "string") next.transport.host = override.hostHeader;
+  if (typeof override.serviceName === "string") next.transport.serviceName = override.serviceName;
+  if (typeof override.security === "string") next.security.mode = override.security.trim();
+  if (typeof override.sni === "string") next.security.sni = override.sni;
+  if (typeof override.fp === "string") next.security.fp = override.fp;
+  if (typeof override.pbk === "string") next.security.pbk = override.pbk;
+  if (typeof override.sid === "string") next.security.sid = override.sid;
+  return next;
+}
+
+function applyOverridesToNormalized(normalized, overrides) {
+  if (!hasMeaningfulOverrides(overrides)) return normalized;
+  const next = JSON.parse(JSON.stringify(normalized || {}));
+  const nodeOverrides = overrides?.nodes && typeof overrides.nodes === "object" ? overrides.nodes : {};
+  const byId = nodeOverrides.byId && typeof nodeOverrides.byId === "object" ? nodeOverrides.byId : {};
+  const byName = nodeOverrides.byName && typeof nodeOverrides.byName === "object" ? nodeOverrides.byName : {};
+  const disabledIds = Array.isArray(nodeOverrides.disabledIds) ? new Set(nodeOverrides.disabledIds.map((x) => String(x))) : new Set();
+
+  next.nodes = (Array.isArray(next.nodes) ? next.nodes : [])
+    .map((node) => {
+      const idKey = String(node?.id || "");
+      const nameKey = String(node?.name || "");
+      const mergedOverride = {
+        ...(byId[idKey] && typeof byId[idKey] === "object" ? byId[idKey] : {}),
+        ...(byName[nameKey] && typeof byName[nameKey] === "object" ? byName[nameKey] : {}),
+      };
+      const applied = applyNodeOverrides(node, mergedOverride);
+      if (disabledIds.has(idKey)) applied.enabled = false;
+      return applied;
+    })
+    .filter((node) => node && node.enabled !== false);
+
+  const topologyOverrides = overrides?.topology && typeof overrides.topology === "object" ? overrides.topology : {};
+  const policyOverrides = overrides?.policy && typeof overrides.policy === "object" ? overrides.policy : {};
+
+  if (topologyOverrides.proxyGroups) {
+    const value = topologyOverrides.proxyGroups;
+    if (Array.isArray(value.replace)) next.topology.proxyGroups = value.replace;
+    if (value.byName && typeof value.byName === "object") {
+      next.topology.proxyGroups = (Array.isArray(next.topology?.proxyGroups) ? next.topology.proxyGroups : []).map((group) => {
+        const patch = value.byName[String(group?.name || "")];
+        return patch && typeof patch === "object" ? { ...group, ...patch } : group;
+      });
+    }
+  }
+
+  if (topologyOverrides.balancers) {
+    const value = topologyOverrides.balancers;
+    if (Array.isArray(value.replace)) next.topology.balancers = value.replace;
+    if (value.byTag && typeof value.byTag === "object") {
+      next.topology.balancers = (Array.isArray(next.topology?.balancers) ? next.topology.balancers : []).map((item) => {
+        const patch = value.byTag[String(item?.tag || "")];
+        return patch && typeof patch === "object" ? { ...item, ...patch } : item;
+      });
+    }
+  }
+
+  if (topologyOverrides.observatory) {
+    const value = topologyOverrides.observatory;
+    if (Array.isArray(value.replace)) next.topology.observatory = value.replace;
+  }
+
+  if (policyOverrides.rules) {
+    const value = policyOverrides.rules;
+    if (Array.isArray(value.replace)) next.policy.rules = value.replace;
+    if (Array.isArray(value.append) && value.append.length > 0) {
+      next.policy.rules = [...(Array.isArray(next.policy?.rules) ? next.policy.rules : []), ...value.append];
+    }
+  }
+
+  if (policyOverrides.routingRules) {
+    const value = policyOverrides.routingRules;
+    if (Array.isArray(value.replace)) next.policy.routingRules = value.replace;
+    if (Array.isArray(value.append) && value.append.length > 0) {
+      next.policy.routingRules = [...(Array.isArray(next.policy?.routingRules) ? next.policy.routingRules : []), ...value.append];
+    }
+  }
+
+  if (policyOverrides.dns && typeof policyOverrides.dns === "object") {
+    next.policy.dns = {
+      ...(next.policy?.dns && typeof next.policy.dns === "object" ? next.policy.dns : {}),
+      ...policyOverrides.dns,
+    };
+  }
+
+  next.meta = {
+    ...(next.meta && typeof next.meta === "object" ? next.meta : {}),
+    overridesApplied: true,
+    overrideVersion: Number(overrides?.version || 0) || undefined,
+  };
+  next.extensions = {
+    ...(next.extensions && typeof next.extensions === "object" ? next.extensions : {}),
+    overrides: overrides,
+  };
+  return next;
+}
+
+function contentTypeForSnapshotOutput(output) {
+  if (output === OUTPUT_JSON) return "application/json; charset=utf-8";
+  if (output === OUTPUT_CLASH) return "text/yaml; charset=utf-8";
+  return "text/plain; charset=utf-8";
+}
+
+function encodeRawFromNormalizedNode(node) {
+  const uri = String(node?.origin?.uri || "").trim();
+  if (uri) return uri;
+  return "";
+}
+
+function renderRawFromNormalized(normalized) {
+  const nodes = Array.isArray(normalized?.nodes) ? normalized.nodes : [];
+  return nodes
+    .map(encodeRawFromNormalizedNode)
+    .filter(Boolean)
+    .join("\n");
+}
+
+function renderJsonFromNormalized(normalized) {
+  const sourceFormat = String(normalized?.meta?.sourceFormat || "").trim().toLowerCase();
+  const xrayConfigs = normalized?.extensions?.xray?.configs;
+  if (!normalized?.meta?.overridesApplied && sourceFormat === "json" && Array.isArray(xrayConfigs) && xrayConfigs.length > 0) {
+    return {
+      ok: true,
+      body: JSON.stringify(xrayConfigs, null, 2),
+      contentType: "application/json; charset=utf-8",
+      conversion: "normalized-json-native",
+    };
+  }
+
+  const rawBody = renderRawFromNormalized(normalized);
+  if (!rawBody) {
+    return { ok: false, error: "no nodes in normalized snapshot" };
+  }
+  const configs = buildJsonConfigBundleFromRaw(rawBody);
+  return {
+    ok: true,
+    body: JSON.stringify(configs, null, 2),
+    contentType: "application/json; charset=utf-8",
+    conversion: "normalized-json",
+  };
+}
+
+async function renderClashFromNormalized(normalized, options = {}) {
+  const sourceFormat = String(normalized?.meta?.sourceFormat || "").trim().toLowerCase();
+  const originalText = String(normalized?.extensions?.clash?.originalText || "").trim();
+  if (!normalized?.meta?.overridesApplied && sourceFormat === "yml" && originalText) {
+    return {
+      ok: true,
+      body: originalText,
+      contentType: "text/yaml; charset=utf-8",
+      conversion: "normalized-clash-native",
+    };
+  }
+
+  if (sourceFormat === "yml" && originalText) {
+    let patched = originalText;
+    if (normalized?.policy?.dns?.raw) {
+      patched = replaceTopLevelYamlSection(patched, "dns", String(normalized.policy.dns.raw));
+    }
+    if (Array.isArray(normalized?.policy?.rules) && normalized.policy.rules.length > 0) {
+      patched = replaceTopLevelYamlSection(
+        patched,
+        "rules",
+        `rules:\n${buildYaml(normalized.policy.rules, 1)}`,
+      );
+    }
+    if (Array.isArray(normalized?.topology?.proxyGroups) && normalized.topology.proxyGroups.length > 0) {
+      patched = patchClashProxyGroupsInOriginalText(patched, normalized.topology.proxyGroups);
+    }
+    return {
+      ok: true,
+      body: patched,
+      contentType: "text/yaml; charset=utf-8",
+      conversion: "normalized-clash-patched",
+    };
+  }
+
+  const rawBody = renderRawFromNormalized(normalized);
+  if (!rawBody) return { ok: false, error: "no nodes in normalized snapshot" };
+  const produced = await produceOutput(rawBody, OUTPUT_CLASH, options);
+  if (!produced.ok) return produced;
+  return {
+    ...produced,
+    conversion: produced.conversion ? `normalized-${produced.conversion}` : "normalized-clash",
+  };
+}
+
+async function renderOutputFromNormalized(normalized, output, options = {}) {
+  if (output === OUTPUT_RAW) {
+    const rawBody = renderRawFromNormalized(normalized);
+    if (!rawBody) return { ok: false, error: "no nodes in normalized snapshot" };
+    return {
+      ok: true,
+      body: rawBody,
+      contentType: "text/plain; charset=utf-8",
+      conversion: "normalized-raw",
+    };
+  }
+  if (output === OUTPUT_RAW_BASE64) {
+    const rawBody = renderRawFromNormalized(normalized);
+    if (!rawBody) return { ok: false, error: "no nodes in normalized snapshot" };
+    return {
+      ok: true,
+      body: Buffer.from(rawBody, "utf8").toString("base64"),
+      contentType: "text/plain; charset=utf-8",
+      conversion: "normalized-raw+base64",
+    };
+  }
+  if (output === OUTPUT_JSON) {
+    return renderJsonFromNormalized(normalized);
+  }
+  if (output === OUTPUT_CLASH) {
+    return renderClashFromNormalized(normalized, options);
+  }
+  return { ok: false, error: `unsupported output: ${output}` };
+}
+
+async function loadLatestStoredSnapshotBundle({ subUrl = "", app = "", device = "", profileNames = [], forwardHeaders = {} }) {
+  const feedKey = buildSubscriptionFeedKey({
+    subUrl,
+    app,
+    device,
+    profiles: profileNames,
+    hwid: String(forwardHeaders?.["x-hwid"] || "").trim(),
+  });
+  const feed = await getSubscriptionFeedByKey(feedKey);
+  if (!feed?.id) return null;
+  const sourceSnapshot = await getLatestSourceSnapshotForFeed(feed.id);
+  if (!sourceSnapshot) return null;
+  const normalizedSnapshot = await getNormalizedSnapshotBySourceSnapshotId(sourceSnapshot.id);
+  const overrides = await getSubscriptionOverridesForFeed(feed.id);
+  return {
+    feed,
+    sourceSnapshot,
+    normalizedSnapshot,
+    overrides,
+  };
+}
+
+async function respondFromStoredSnapshot(res, bundle, output, options = {}) {
+  if (!bundle?.sourceSnapshot) return false;
+  const sameFormat = sourceFormatMatchesOutput(bundle.sourceSnapshot.sourceFormat, output) && !hasMeaningfulOverrides(bundle?.overrides?.overrides);
+  let body = "";
+  let contentType = contentTypeForSnapshotOutput(output);
+  let extraHeaders = sanitizeUpstreamResponseHeaders(bundle.sourceSnapshot.responseHeaders || {});
+
+  if (sameFormat) {
+    body = readSnapshotFile(bundle.sourceSnapshot.bodyPath);
+    contentType =
+      String(bundle.sourceSnapshot.responseHeaders?.["content-type"] || "").trim() ||
+      String(bundle.sourceSnapshot.responseHeaders?.["Content-Type"] || "").trim() ||
+      contentTypeForSnapshotOutput(output);
+  } else {
+    if (!bundle.normalizedSnapshot?.normalizedPath) return false;
+    const normalized = applyOverridesToNormalized(
+      JSON.parse(readSnapshotFile(bundle.normalizedSnapshot.normalizedPath)),
+      bundle?.overrides ? { ...bundle.overrides.overrides, version: bundle.overrides.version } : null,
+    );
+    const rendered = await renderOutputFromNormalized(normalized, output, options);
+    if (!rendered.ok) return false;
+    body = String(rendered.body || "");
+    contentType = rendered.contentType || contentType;
+  }
+
+  res.writeHead(200, {
+    ...extraHeaders,
+    "Content-Type": contentType,
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(body);
+  return true;
+}
+
 function extractVlessLines(text) {
   return text
     .split(/\r?\n/)
@@ -103,6 +634,226 @@ function extractSubscriptionLines(text) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => /^(vmess|vless|ss|ssr|trojan):\/\//.test(line));
+}
+
+function normalizeJsonNodeName(value, fallback = "node") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+function buildXrayStreamSettings(item) {
+  const network = String(item?.network || "tcp").trim() || "tcp";
+  const security = String(item?.security || "none").trim() || "none";
+  const settings = {
+    network,
+  };
+
+  if (security && security !== "none") settings.security = security;
+
+  if (security === "reality") {
+    settings.realitySettings = {
+      show: false,
+    };
+    if (item?.servername) settings.realitySettings.serverName = String(item.servername);
+    if (item?.publicKey) settings.realitySettings.publicKey = String(item.publicKey);
+    if (item?.shortId) settings.realitySettings.shortId = String(item.shortId);
+    if (item?.clientFingerprint) settings.realitySettings.fingerprint = String(item.clientFingerprint);
+  } else if (security === "tls" || security === "xtls") {
+    settings.tlsSettings = {};
+    if (item?.servername) settings.tlsSettings.serverName = String(item.servername);
+    const alpn = String(item?.transport?.alpn || "").trim();
+    if (alpn) settings.tlsSettings.alpn = alpn.split(",").map((part) => part.trim()).filter(Boolean);
+    if (item?.clientFingerprint) settings.tlsSettings.fingerprint = String(item.clientFingerprint);
+  }
+
+  if (network === "ws") {
+    settings.wsSettings = {};
+    if (item?.path) settings.wsSettings.path = String(item.path);
+    if (item?.host) settings.wsSettings.headers = { Host: String(item.host) };
+  } else if (network === "grpc") {
+    settings.grpcSettings = {};
+    if (item?.serviceName) settings.grpcSettings.serviceName = String(item.serviceName);
+    if (item?.transport?.authority) settings.grpcSettings.authority = String(item.transport.authority);
+    if (item?.transport?.mode) settings.grpcSettings.mode = String(item.transport.mode) === "gun";
+  } else if (network === "tcp" && item?.transport?.headerType) {
+    settings.tcpSettings = {
+      header: { type: String(item.transport.headerType) },
+    };
+  }
+
+  return settings;
+}
+
+function buildXrayOutboundFromImportedItem(item, index) {
+  const protocol = String(item?.type || "").toLowerCase();
+  const name = normalizeJsonNodeName(item?.name, `node-${index + 1}`);
+  const tag = `node-${String(index + 1).padStart(4, "0")}`;
+  const server = String(item?.server || "").trim();
+  const port = Number(item?.port || 0);
+  if (!server || !port) return null;
+
+  if (protocol === "vless") {
+    const user = {
+      id: String(item?.uuid || "").trim(),
+      encryption: "none",
+    };
+    if (item?.flow) user.flow = String(item.flow);
+    return {
+      tag,
+      protocol: "vless",
+      settings: {
+        vnext: [
+          {
+            address: server,
+            port,
+            users: [user],
+          },
+        ],
+      },
+      streamSettings: buildXrayStreamSettings(item),
+      remarks: name,
+    };
+  }
+
+  if (protocol === "trojan") {
+    return {
+      tag,
+      protocol: "trojan",
+      settings: {
+        servers: [
+          {
+            address: server,
+            port,
+            password: String(item?.password || ""),
+          },
+        ],
+      },
+      streamSettings: buildXrayStreamSettings(item),
+      remarks: name,
+    };
+  }
+
+  if (protocol === "vmess") {
+    return {
+      tag,
+      protocol: "vmess",
+      settings: {
+        vnext: [
+          {
+            address: server,
+            port,
+            users: [
+              {
+                id: String(item?.uuid || "").trim(),
+                alterId: Number(item?.transport?.aid || 0),
+                security: "auto",
+              },
+            ],
+          },
+        ],
+      },
+      streamSettings: buildXrayStreamSettings(item),
+      remarks: name,
+    };
+  }
+
+  if (protocol === "ss") {
+    return {
+      tag,
+      protocol: "shadowsocks",
+      settings: {
+        servers: [
+          {
+            address: server,
+            port,
+            method: "",
+            password: String(item?.password || ""),
+          },
+        ],
+      },
+      remarks: name,
+    };
+  }
+
+  if (protocol === "ssr") {
+    return {
+      tag,
+      protocol: "shadowsocks",
+      settings: {
+        servers: [
+          {
+            address: server,
+            port,
+            method: String(item?.transport?.method || ""),
+            password: String(item?.password || ""),
+          },
+        ],
+      },
+      remarks: name,
+    };
+  }
+
+  return null;
+}
+
+function buildJsonConfigBundleFromRaw(rawText) {
+  const parsed = parseBulkProxyText(rawText);
+  const configs = parsed
+    .map((item, index) => {
+      const outbound = buildXrayOutboundFromImportedItem(item, index);
+      if (!outbound) return null;
+      return {
+        remarks: normalizeJsonNodeName(item.name, `node-${index + 1}`),
+        log: {
+          loglevel: "warning",
+        },
+        dns: {
+          servers: ["8.8.8.8", "1.1.1.1"],
+          queryStrategy: "UseIPv4",
+        },
+        inbounds: [
+          {
+            tag: "socks",
+            port: 10808,
+            listen: "127.0.0.1",
+            protocol: "socks",
+            settings: {
+              udp: true,
+              auth: "noauth",
+            },
+          },
+          {
+            tag: "http",
+            port: 10809,
+            listen: "127.0.0.1",
+            protocol: "http",
+            settings: {},
+          },
+        ],
+        outbounds: [
+          outbound,
+          { tag: "direct", protocol: "freedom" },
+          { tag: "block", protocol: "blackhole" },
+        ],
+        routing: {
+          domainStrategy: "AsIs",
+          rules: [
+            {
+              type: "field",
+              protocol: ["bittorrent"],
+              outboundTag: "block",
+            },
+            {
+              type: "field",
+              outboundTag: outbound.tag,
+            },
+          ],
+        },
+      };
+    })
+    .filter(Boolean);
+
+  return configs;
 }
 
 function hasAnySubscriptions(text) {
@@ -428,6 +1179,123 @@ function parseClashProxyList(yamlText) {
 
   pushCurrent();
   return proxies;
+}
+
+function extractTopLevelYamlSection(yamlText, sectionName) {
+  const text = String(yamlText || "").replace(/\t/g, "  ");
+  const lines = text.split(/\r?\n/);
+  const target = String(sectionName || "").trim();
+  if (!target) return "";
+  const out = [];
+  let collecting = false;
+
+  for (const line of lines) {
+    const topLevelMatch = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/);
+    if (!collecting) {
+      if (topLevelMatch && topLevelMatch[1] === target) {
+        collecting = true;
+        out.push(line);
+      }
+      continue;
+    }
+    if (topLevelMatch && !line.startsWith(" ") && !line.startsWith("\t")) break;
+    out.push(line);
+  }
+
+  return out.join("\n").trimEnd();
+}
+
+function parseYamlListBlocks(sectionText) {
+  const text = String(sectionText || "").trim();
+  if (!text) return [];
+  const body = text.replace(/^[A-Za-z0-9_.-]+\s*:\s*\n?/i, "");
+  return body
+    .split(/\n(?=\s*-\s+)/)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.startsWith("-"));
+}
+
+function parseClashProxyGroups(yamlText) {
+  const section = extractTopLevelYamlSection(yamlText, "proxy-groups");
+  if (!section) return [];
+  return parseYamlListBlocks(section)
+    .map((block) => {
+      const normalizedBlock = String(block || "").replace(/^(\s*)-\s*/, "$1");
+      const flat = parseYamlProxyBlock(normalizedBlock);
+      return {
+        name: String(flat.name || "").trim(),
+        type: String(flat.type || "").trim(),
+        proxies: Array.isArray(flat.proxies) ? flat.proxies : (flat.proxies ? [flat.proxies] : []),
+        url: String(flat.url || "").trim(),
+        interval: String(flat.interval || "").trim(),
+        tolerance: String(flat.tolerance || "").trim(),
+        flat,
+      };
+    })
+    .filter((item) => item.name);
+}
+
+function parseClashRules(yamlText) {
+  const section = extractTopLevelYamlSection(yamlText, "rules");
+  if (!section) return [];
+  return parseYamlListBlocks(section)
+    .map((block) => String(block || "").replace(/^\s*-\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function replaceTopLevelYamlSection(yamlText, sectionName, replacementText) {
+  const text = String(yamlText || "").replace(/\t/g, "  ");
+  const target = String(sectionName || "").trim();
+  if (!target) return text;
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let replaced = false;
+  let skipping = false;
+
+  for (const line of lines) {
+    const topLevelMatch = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/);
+    if (skipping) {
+      if (topLevelMatch && !line.startsWith(" ") && !line.startsWith("\t")) {
+        skipping = false;
+      } else {
+        continue;
+      }
+    }
+    if (!skipping && topLevelMatch && topLevelMatch[1] === target) {
+      if (replacementText) out.push(String(replacementText).trimEnd());
+      replaced = true;
+      skipping = true;
+      continue;
+    }
+    out.push(line);
+  }
+
+  if (!replaced && replacementText) out.push(String(replacementText).trimEnd());
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function patchClashProxyGroupsInOriginalText(originalText, proxyGroups) {
+  let next = String(originalText || "");
+  for (const group of Array.isArray(proxyGroups) ? proxyGroups : []) {
+    const name = String(group?.name || "").trim();
+    if (!name) continue;
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const blockPattern = new RegExp(`((?:^|\\n)\\s*-\\s+name\\s*:\\s*${escapedName}\\s*[\\s\\S]*?)(?=\\n\\s*-\\s+name\\s*:|\\n[A-Za-z0-9_.-]+\\s*:|$)`, "m");
+    const match = next.match(blockPattern);
+    if (!match) continue;
+    let block = match[1];
+    for (const [field, value] of Object.entries(group || {})) {
+      if (field === "name" || field === "proxies" || field === "flat") continue;
+      const text = String(value || "").trim();
+      if (!text) continue;
+      const fieldPattern = new RegExp(`(^\\s*${field}\\s*:\\s*).*$`, "m");
+      if (fieldPattern.test(block)) {
+        block = block.replace(fieldPattern, `$1${text}`);
+      }
+    }
+    next = next.replace(blockPattern, block);
+  }
+  return next;
 }
 
 function parseYamlProxyBlock(block) {
@@ -1152,6 +2020,103 @@ function sanitizeUpstreamResponseHeaders(headers) {
   return out;
 }
 
+function resolveRequesterId(req) {
+  if (!req || typeof req !== "object") return "";
+  const forwardedFor = String(req.headers?.["x-forwarded-for"] || "").split(",")[0].trim();
+  const remote = String(req.socket?.remoteAddress || req.connection?.remoteAddress || "").trim();
+  return forwardedFor || remote;
+}
+
+function buildSnapshotRequestContext({ route = "", output = "", profileNames = [], app = "", device = "", forwardHeaders = {}, req = null } = {}) {
+  return {
+    route: String(route || "").trim(),
+    output: String(output || "").trim(),
+    profileNames: Array.isArray(profileNames) ? profileNames.map((item) => String(item || "").trim()).filter(Boolean) : [],
+    app: String(app || "").trim(),
+    device: String(device || "").trim(),
+    forwardHeaders: sanitizeForwardHeaders(forwardHeaders || {}),
+    requestPath: req?.url ? String(req.url) : "",
+    requesterId: resolveRequesterId(req),
+  };
+}
+
+async function persistSuccessfulSourceSnapshot({
+  req = null,
+  route = "",
+  subUrl = "",
+  output = "",
+  profileNames = [],
+  app = "",
+  device = "",
+  forwardHeaders = {},
+  fetched,
+}) {
+  if (!fetched || Number(fetched.responseStatus || 0) < 200 || Number(fetched.responseStatus || 0) >= 300) {
+    return null;
+  }
+  const body = String(fetched.body || "");
+  if (!body) return null;
+
+  const feed = await upsertSubscriptionFeed({
+    subUrl,
+    app,
+    device,
+    profiles: profileNames,
+    hwid: String(forwardHeaders?.["x-hwid"] || "").trim(),
+  });
+  const storedBody = writeRawSourceSnapshotBody(
+    `${feed.id}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
+    body,
+  );
+  const contentType =
+    String(fetched.responseHeaders?.["content-type"] || "").trim() ||
+    String(fetched.responseHeaders?.["Content-Type"] || "").trim();
+  const sourceFormat = detectSourceFormat(body, contentType);
+  const sourceSnapshot = await createSourceSnapshot({
+    feedId: feed.id,
+    fetchedAt: new Date().toISOString(),
+    fetchedByType: route ? `route:${route}` : "route",
+    fetchedById: resolveRequesterId(req),
+    requestContext: buildSnapshotRequestContext({
+      route,
+      output,
+      profileNames,
+      app,
+      device,
+      forwardHeaders,
+      req,
+    }),
+    responseStatus: fetched.responseStatus,
+    responseUrl: fetched.responseUrl,
+    responseHeaders: fetched.responseHeaders || {},
+    bodyPath: storedBody.path,
+    bodySha256: storedBody.sha256,
+    bodyBytes: storedBody.bytes,
+    sourceFormat,
+    sourceFormatDetails: {
+      contentType,
+      detectedAt: new Date().toISOString(),
+    },
+  });
+  const normalized = buildNormalizedModelFromSource(body, contentType);
+  const normalizedStored = writeNormalizedSnapshotFile(
+    `${sourceSnapshot.id}-normalized-v1`,
+    normalized.model,
+  );
+  await createNormalizedSnapshot({
+    feedId: feed.id,
+    sourceSnapshotId: sourceSnapshot.id,
+    schemaVersion: Number(normalized.model?.schemaVersion || 1),
+    parserVersion: "normalized-v1",
+    normalizedPath: normalizedStored.path,
+    normalizedSha256: normalizedStored.sha256,
+    warnings: Array.isArray(normalized.warnings) ? normalized.warnings : [],
+    lossFlags: Array.isArray(normalized.lossFlags) ? normalized.lossFlags : [],
+  });
+  await pruneStoredSnapshots(feed.id);
+  return sourceSnapshot;
+}
+
 async function callSubconverter(target, listMode) {
   const finalUrl = `${CONVERTER_URL}?target=${encodeURIComponent(target)}&url=${encodeURIComponent(
     SOURCE_URL,
@@ -1332,6 +2297,15 @@ async function produceOutput(rawText, output, options = {}) {
 
     const rawResult = await produceOutput(rawText, OUTPUT_RAW, options);
     if (!rawResult.ok) return rawResult;
+    const configs = buildJsonConfigBundleFromRaw(String(rawResult.body || ""));
+    if (configs.length > 0) {
+      return {
+        ok: true,
+        body: JSON.stringify(configs, null, 2),
+        contentType: "application/json; charset=utf-8",
+        conversion: rawResult.conversion === "none-raw" ? "raw-json-bundle" : `${rawResult.conversion}+raw-json-bundle`,
+      };
+    }
     return {
       ok: true,
       body: JSON.stringify(extractSubscriptionLines(rawResult.body), null, 2),
@@ -1429,8 +2403,19 @@ async function produceOutput(rawText, output, options = {}) {
   return { ok: true, body: out, contentType: "text/yaml; charset=utf-8", conversion };
 }
 
-async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = "") {
+async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = "", device = "", req = null) {
   const fetched = await fetchWithNode(subUrl, forwardHeaders);
+  await persistSuccessfulSourceSnapshot({
+    req,
+    route: "/last",
+    subUrl,
+    output,
+    profileNames,
+    app,
+    device,
+    forwardHeaders,
+    fetched,
+  });
   const produced = await produceOutput(fetched.body, output, { app });
   if (!produced.ok) {
     return produced;
@@ -1492,6 +2477,17 @@ async function handleSubscription(req, res, forcedProfileName = "") {
   const startedAt = new Date().toISOString();
   try {
     const fetched = await fetchWithNode(subUrl, forwardHeaders);
+    await persistSuccessfulSourceSnapshot({
+      req,
+      route: "/sub",
+      subUrl,
+      output,
+      profileNames,
+      app,
+      device,
+      forwardHeaders,
+      fetched,
+    });
     const raw = fetched.body;
     const upstreamHeaders = sanitizeUpstreamResponseHeaders(fetched.responseHeaders);
 
@@ -1606,6 +2602,27 @@ async function handleSubscription(req, res, forcedProfileName = "") {
       durationMs: Date.now() - startedAtMs,
     });
   } catch (e) {
+    const fallback = await loadLatestStoredSnapshotBundle({
+      subUrl,
+      app,
+      device,
+      profileNames,
+      forwardHeaders,
+    });
+    if (await respondFromStoredSnapshot(res, fallback, output, { app })) {
+      logRequest({
+        route: "/sub",
+        status: 200,
+        profiles: profileNames,
+        output,
+        app,
+        device,
+        cache: "snapshot-fallback",
+        durationMs: Date.now() - startedAtMs,
+        error: e?.message || String(e),
+      });
+      return;
+    }
     res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(`failed to fetch subscription: ${e?.message || e}`);
     logRequest({
@@ -1661,7 +2678,7 @@ async function handleLast(req, res, forcedProfileName = "") {
 
   let refreshed = null;
   try {
-    refreshed = await refreshCache(subUrl, output, profileNames, forwardHeaders, app);
+    refreshed = await refreshCache(subUrl, output, profileNames, forwardHeaders, app, device, req);
   } catch {
     refreshed = null;
   }
@@ -1740,6 +2757,27 @@ async function handleLast(req, res, forcedProfileName = "") {
       });
     }
   } catch (err) {
+    const fallback = await loadLatestStoredSnapshotBundle({
+      subUrl,
+      app,
+      device,
+      profileNames,
+      forwardHeaders,
+    });
+    if (await respondFromStoredSnapshot(res, fallback, output, { app })) {
+      logRequest({
+        route: "/last",
+        status: 200,
+        profiles: profileNames,
+        output,
+        app,
+        device,
+        cache: "snapshot-fallback",
+        durationMs: Date.now() - startedAtMs,
+        error: err?.message || String(err),
+      });
+      return;
+    }
     if (err && err.code === "ENOENT") {
       res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("no cached subscription for provided parameters");
@@ -1826,6 +2864,14 @@ async function handleEcho(req, res) {
 }
 
 export {
+  buildNormalizedModelFromSource,
+  detectSourceFormat,
+  applyOverridesToNormalized,
+  hasMeaningfulOverrides,
+  renderClashFromNormalized,
+  renderOutputFromNormalized,
+  loadLatestStoredSnapshotBundle,
+  sourceFormatMatchesOutput,
   parseProfileYaml,
   getUaCatalogOptions,
   readProfileFile,
@@ -1834,6 +2880,7 @@ export {
   resolveLocalSourcePath,
   resolveRequestConfig,
   produceOutput,
+  persistSuccessfulSourceSnapshot,
   fetchWithNode,
   handleSubscription,
   handleLast,

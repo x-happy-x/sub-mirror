@@ -105,7 +105,13 @@ test("produceOutput supports raw base64 and json outputs", async () => {
   const jsonResult = await produceOutput(rawInput, "json");
   assert.equal(jsonResult.ok, true);
   assert.equal(jsonResult.contentType, "application/json; charset=utf-8");
-  assert.deepEqual(JSON.parse(String(jsonResult.body)), [rawInput]);
+  const parsedJson = JSON.parse(String(jsonResult.body));
+  assert.ok(Array.isArray(parsedJson));
+  assert.equal(parsedJson.length, 1);
+  assert.equal(parsedJson[0].remarks, "test");
+  assert.equal(parsedJson[0].outbounds?.[0]?.protocol, "vless");
+  assert.equal(parsedJson[0].outbounds?.[0]?.settings?.vnext?.[0]?.address, "example.com");
+  assert.equal(parsedJson[0].routing?.rules?.[1]?.outboundTag, "node-0001");
 });
 
 test("produceOutput wraps clash output for flclashx into full config", async () => {

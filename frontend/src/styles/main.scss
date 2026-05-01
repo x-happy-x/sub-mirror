@@ -509,6 +509,32 @@ body {
   text-decoration: none;
 }
 
+.overrides-layout {
+  display: grid;
+  gap: 12px;
+}
+
+.overrides-pane {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background:
+    radial-gradient(120% 120% at 100% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 62%),
+    var(--paper);
+}
+
+.overrides-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+}
+
 .labels {
   margin-top: 9px;
   display: flex;
@@ -1075,6 +1101,28 @@ textarea {
   display: grid;
   gap: 4px;
   background: color-mix(in srgb, var(--paper) 95%, transparent);
+}
+
+.share-access-card {
+  margin-top: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.share-access-list {
+  display: grid;
+  gap: 10px;
+}
+
+.share-access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.share-access-row select {
+  min-width: 120px;
 }
 
 .editor-layout {
