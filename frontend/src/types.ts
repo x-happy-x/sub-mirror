@@ -5,6 +5,7 @@ export type SubscriptionPayload = {
   endpoint: Endpoint;
   sub_url: string;
   output: Output;
+  output_auto?: string;
   app?: string;
   device?: string;
   profile?: string;

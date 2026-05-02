@@ -7,7 +7,7 @@ import {
 } from "./sqlite-store.js";
 
 const VALID_ENDPOINTS = new Set(["last", "sub"]);
-const PARAM_KEYS = ["sub_url", "output", "app", "device", "profile", "profiles", "hwid", "endpoint"];
+const PARAM_KEYS = ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "endpoint"];
 
 function sanitizeParams(input) {
   const out = {};
@@ -112,7 +112,7 @@ async function updateShortLink(id, params, actor = null) {
 function buildQueryFromParams(params) {
   const qp = new URLSearchParams();
   const source = sanitizeParams(params || {});
-  for (const key of ["sub_url", "output", "app", "device", "profile", "profiles", "hwid"]) {
+  for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"]) {
     if (source[key]) qp.set(key, source[key]);
   }
   return qp;

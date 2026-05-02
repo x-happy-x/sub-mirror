@@ -14,7 +14,7 @@ import type {
 } from "../types";
 import type { FavoriteItem } from "../types";
 
-const PARAM_KEYS = ["sub_url", "endpoint", "output", "app", "device", "profile", "profiles", "hwid"] as const;
+const PARAM_KEYS = ["sub_url", "endpoint", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"] as const;
 
 function currentBrowserOrigin(): string {
   if (typeof window === "undefined" || !window.location?.origin) return "";

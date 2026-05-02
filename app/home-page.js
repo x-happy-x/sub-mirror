@@ -572,6 +572,10 @@ function renderHomePage() {
           <div>
             <label>output</label>
             <input id="output" type="hidden" value="yml" />
+            <input id="output_auto" type="hidden" value="" />
+            <div class="chip-row">
+              <button type="button" id="outputAutoToggle" class="chip">auto по UA</button>
+            </div>
             <div id="outputChips" class="chip-row">
               <button type="button" class="chip active" data-value="yml">yml / clash</button>
               <button type="button" class="chip" data-value="raw">raw</button>
@@ -950,7 +954,7 @@ function renderHomePage() {
 
   <script>
     const qs = (id) => document.getElementById(id);
-    const fields = ["sub_url", "endpoint", "output", "app", "device", "profile", "profiles", "hwid"];
+    const fields = ["sub_url", "endpoint", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"];
     const state = {};
     for (const key of fields) state[key] = qs(key);
 
@@ -1480,6 +1484,7 @@ function renderHomePage() {
       const isCache = (state.endpoint.value || "last") === "last";
       qs("cacheToggle").classList.toggle("active", isCache);
       qs("cacheToggle").textContent = isCache ? "Кэшировать подписку" : "Без кэширования";
+      qs("outputAutoToggle").classList.toggle("active", Boolean((state.output_auto.value || "").trim()));
       syncSourceModeChips();
     }
 
@@ -1490,6 +1495,7 @@ function renderHomePage() {
         endpoint: (state.endpoint.value || "last").trim() || "last",
         output: (state.output.value || "yml").trim() || "yml",
       };
+      if ((state.output_auto.value || "").trim()) payload.output_auto = "1";
       if (subUrl) payload.sub_url = subUrl;
       for (const key of ["app", "device", "profile", "profiles", "hwid"]) {
         const value = (state[key].value || "").trim();
@@ -1502,7 +1508,7 @@ function renderHomePage() {
       const payload = composePayload();
       const endpoint = payload.endpoint === "sub" ? "sub" : "last";
       const params = new URLSearchParams();
-      for (const key of ["sub_url", "output", "app", "device", "profile", "profiles", "hwid"]) {
+      for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"]) {
         if (payload[key]) params.set(key, payload[key]);
       }
       if (!params.get("output")) params.set("output", "yml");
@@ -1546,6 +1552,7 @@ function renderHomePage() {
             endpoint: path === "sub" ? "sub" : "last",
             sub_url: u.searchParams.get("sub_url") || "",
             output: u.searchParams.get("output") || "yml",
+            output_auto: u.searchParams.get("output_auto") || "",
             app: u.searchParams.get("app") || "",
             device: u.searchParams.get("device") || "",
             profile: u.searchParams.get("profile") || "",
@@ -1628,7 +1635,7 @@ function renderHomePage() {
 
     function labelsFromPayload(payload) {
       const labels = [];
-      labels.push((payload.output || "yml").toLowerCase());
+      labels.push(payload.output_auto ? "auto:" + String(payload.output || "yml").toLowerCase() : String(payload.output || "yml").toLowerCase());
       if (payload.app) labels.push(payload.app);
       if (payload.device) labels.push(payload.device);
       if (payload.profile) labels.push("profile:" + payload.profile);
@@ -1789,6 +1796,7 @@ function renderHomePage() {
         endpoint: payload.endpoint,
         sub_url: payload.sub_url,
         output: payload.output,
+        output_auto: payload.output_auto || "",
         app: payload.app || "",
         device: payload.device || "",
         profile: payload.profile || "",
@@ -1816,7 +1824,7 @@ function renderHomePage() {
       const data = payload && typeof payload === "object" ? payload : {};
       const endpoint = data.endpoint === "sub" ? "sub" : "last";
       const params = new URLSearchParams();
-      for (const key of ["sub_url", "output", "app", "device", "profile", "profiles", "hwid"]) {
+      for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"]) {
         const value = String(data[key] || "").trim();
         if (value) params.set(key, value);
       }
@@ -1869,6 +1877,7 @@ function renderHomePage() {
         endpoint: p.endpoint === "sub" ? "sub" : "last",
         sub_url: p.sub_url || "",
         output: p.output || "yml",
+        output_auto: p.output_auto || "",
         app: p.app || "",
         device: p.device || "",
         profile: p.profile || "",
@@ -2226,6 +2235,12 @@ function renderHomePage() {
     on("cacheToggle", "click", () => {
       const nextIsCache = state.endpoint.value !== "last";
       state.endpoint.value = nextIsCache ? "last" : "sub";
+      syncChips();
+      update();
+    });
+
+    on("outputAutoToggle", "click", () => {
+      state.output_auto.value = (state.output_auto.value || "").trim() ? "" : "1";
       syncChips();
       update();
     });

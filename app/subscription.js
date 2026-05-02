@@ -42,6 +42,7 @@ import {
   readSnapshotFile,
   pruneStoredSnapshots,
 } from "./source-snapshots.js";
+import { getAppsCatalog } from "./apps-catalog.js";
 
 const UA_CATALOG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../resources/ua-catalog.json");
 const execFile = promisify(execFileCb);
@@ -1680,6 +1681,7 @@ function sanitizeForwardHeaders(headers) {
       key === "x-sub-url" ||
       key === "x-use-converter" ||
       key === "x-output" ||
+      key === "x-output-auto" ||
       key === "x-app" ||
       key === "x-device" ||
       key === "x-profile" ||
@@ -1703,6 +1705,12 @@ function parseOptionalOutput(v) {
   const value = firstHeaderValue(v);
   if (value === undefined || value === null || value === "") return undefined;
   return normalizeOutput(value);
+}
+
+function normalizeOutputAutoFlag(v) {
+  const value = firstHeaderValue(v);
+  if (value === undefined || value === null || value === "") return undefined;
+  return parseBool(value, false);
 }
 
 function unquoteYamlValue(value) {
@@ -1860,6 +1868,66 @@ function getUaCatalogOptions() {
     ? raw.__default__.trim()
     : "";
   return { options, defaultUa };
+}
+
+function normalizeAppMatchToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function resolveKnownAppKeyFromUserAgent(userAgent) {
+  const ua = String(userAgent || "").trim();
+  if (!ua) return "";
+  if (/\bhapp\/\d+(?:\.\d+)*(?:\/|$)/i.test(ua)) return "happ";
+  if (/\bclash\.meta\/v?\d+(?:\.\d+)*(?:\b|$)/i.test(ua)) return "clash-meta";
+  if (/\bflclash\s*x\/v?\d+(?:\.\d+)*(?:\b|$)/i.test(ua)) return "flclashx";
+  return "";
+}
+
+function resolveAppKeyFromUserAgent(userAgent) {
+  const ua = String(userAgent || "").trim();
+  if (!ua) return "";
+  const knownAppKey = resolveKnownAppKeyFromUserAgent(ua);
+  if (knownAppKey) return knownAppKey;
+  const compactUa = normalizeAppMatchToken(ua);
+  if (!compactUa) return "";
+
+  const { options } = getUaCatalogOptions();
+  for (const appMap of Object.values(options)) {
+    if (!appMap || typeof appMap !== "object") continue;
+    for (const [appKey, catalogUa] of Object.entries(appMap)) {
+      const compactCatalogUa = normalizeAppMatchToken(catalogUa);
+      if (compactCatalogUa && (compactUa.includes(compactCatalogUa) || compactCatalogUa.includes(compactUa))) {
+        return sanitizeProfileToken(appKey);
+      }
+    }
+  }
+
+  const catalog = getAppsCatalog();
+  for (const item of Array.isArray(catalog.items) ? catalog.items : []) {
+    const keyToken = normalizeAppMatchToken(item?.key || "");
+    const labelToken = normalizeAppMatchToken(item?.label || "");
+    if ((keyToken && compactUa.includes(keyToken)) || (labelToken && compactUa.includes(labelToken))) {
+      return sanitizeProfileToken(item?.key || "");
+    }
+  }
+  return "";
+}
+
+function resolveOutputFromUserAgent(userAgent, fallbackOutput = OUTPUT_DEFAULT) {
+  const fallback = normalizeOutput(fallbackOutput) || OUTPUT_DEFAULT;
+  const appKey = resolveAppKeyFromUserAgent(userAgent);
+  if (!appKey) {
+    return { output: fallback, app: "", matched: false };
+  }
+  const catalog = getAppsCatalog();
+  const item = Array.isArray(catalog.items)
+    ? catalog.items.find((entry) => sanitizeProfileToken(entry?.key || "") === appKey)
+    : null;
+  const format = Array.isArray(item?.formats) && item.formats.length > 0
+    ? String(item.formats[0] || "").trim().toLowerCase()
+    : "";
+  const output = format === "raw" ? OUTPUT_RAW : OUTPUT_CLASH;
+  return { output, app: appKey, matched: true };
 }
 
 function pickProfileNames(reqUrl, reqHeaders, forcedProfileName = "") {
@@ -2037,17 +2105,25 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
   if ((outputFromQuery || outputFromHeader) && !explicitOutput) {
     return { ok: false, status: 400, error: "unsupported output (use: clash|yml|yaml|raw|raw_base64|json)" };
   }
+  const outputAutoFromQuery = reqUrl.searchParams.get("output_auto");
+  const outputAutoFromHeader = reqHeaders["x-output-auto"];
+  const outputAuto = normalizeOutputAutoFlag(outputAutoFromQuery ?? outputAutoFromHeader) === true;
 
   const legacyFromQuery = reqUrl.searchParams.get("use_converter");
   const legacyFromHeader = reqHeaders["x-use-converter"];
   const explicitLegacyUseConverter = parseOptionalBool(legacyFromQuery ?? legacyFromHeader);
-  const output =
+  const fallbackOutput =
     explicitOutput ??
     (explicitLegacyUseConverter !== undefined
       ? explicitLegacyUseConverter
         ? OUTPUT_CLASH
         : OUTPUT_RAW
       : merged.profile.output || OUTPUT_DEFAULT);
+  const requestUserAgent = String(firstHeaderValue(reqHeaders["user-agent"]) || "").trim();
+  const output =
+    outputAuto && requestUserAgent
+      ? resolveOutputFromUserAgent(requestUserAgent, fallbackOutput).output
+      : fallbackOutput;
 
   const hwidFromQuery = String(reqUrl.searchParams.get("hwid") || "").trim();
   const hwidFromHeader = String(firstHeaderValue(reqHeaders["x-hwid"]) || "").trim();
@@ -2060,6 +2136,7 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
     ok: true,
     subUrl,
     output,
+    outputAuto,
     app,
     device,
     profileNames,
@@ -2265,7 +2342,7 @@ function resolveLocalSourcePath(input) {
 
 function buildRequestUrlFromParams(params) {
   const reqUrl = new URL("http://localhost/sub");
-  for (const key of ["sub_url", "output", "app", "device", "profile", "profiles", "hwid"]) {
+  for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"]) {
     const value = params?.[key];
     if (value === undefined || value === null || value === "") continue;
     reqUrl.searchParams.set(key, String(value));
@@ -2949,6 +3026,8 @@ export {
   extractHappDecryptResult,
   parseProfileYaml,
   getUaCatalogOptions,
+  resolveAppKeyFromUserAgent,
+  resolveOutputFromUserAgent,
   readProfileFile,
   profileExists,
   pickUserAgentProfile,

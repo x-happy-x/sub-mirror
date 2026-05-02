@@ -7,6 +7,8 @@ import {
   renderHomePage,
   readProfileFile,
   pickUserAgentProfile,
+  resolveAppKeyFromUserAgent,
+  resolveOutputFromUserAgent,
   resolveLocalSourcePath,
   resolveRequestConfig,
   resolveShortLinkTypeOverride,
@@ -42,6 +44,20 @@ test("ua profile selection prefers app+device and falls back to ua-default", () 
   assert.equal(fallback.headers["user-agent"], "SubLab/UA Default (Windows)");
 });
 
+test("output auto resolves known app format from request user-agent", () => {
+  assert.equal(resolveAppKeyFromUserAgent("FlClash X/0.3.2 Platform/android"), "flclashx");
+  assert.equal(resolveOutputFromUserAgent("FlClash X/0.3.2 Platform/android", "raw").output, "clash");
+  assert.equal(resolveOutputFromUserAgent("Happ/3.10.0/iOS", "yml").output, "raw");
+  assert.equal(resolveAppKeyFromUserAgent("Happ/3.18.3/Android/17771400994551771562"), "happ");
+  assert.equal(resolveOutputFromUserAgent("Happ/3.18.3/Android/17771400994551771562", "yml").output, "raw");
+  assert.equal(resolveAppKeyFromUserAgent("clash.meta/v1.19.24"), "clash-meta");
+  assert.equal(resolveOutputFromUserAgent("clash.meta/v1.19.24", "raw").output, "clash");
+  assert.equal(resolveAppKeyFromUserAgent("FlClash X/v0.3.2 Platform/android"), "flclashx");
+  assert.equal(resolveOutputFromUserAgent("FlClash X/v0.3.2 Platform/android", "raw").output, "clash");
+  assert.equal(resolveAppKeyFromUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Mobile/15E148 Safari/604.1"), "");
+  assert.equal(resolveOutputFromUserAgent("Unknown Client/1.0", "raw").output, "raw");
+});
+
 test("request config merges base and auto ua profiles with output alias", () => {
   const reqUrl = new URL(
     "http://localhost/last?app=flclashx&device=android&output=yml&profile=xiaomi&sub_url=https://example.com/sub",
@@ -52,6 +68,28 @@ test("request config merges base and auto ua profiles with output alias", () => 
   assert.deepEqual(result.profileNames, ["xiaomi"]);
   assert.equal(result.forwardHeaders["x-device-os"], "Android");
   assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.3.2 Platform/android");
+});
+
+test("request config output_auto uses request user-agent when present", () => {
+  const reqUrl = new URL(
+    "http://localhost/last?output=yml&output_auto=1&sub_url=https://example.com/sub",
+  );
+  const result = resolveRequestConfig(reqUrl, {
+    "user-agent": "Happ/3.10.0/iOS",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.outputAuto, true);
+  assert.equal(result.output, "raw");
+});
+
+test("request config output_auto falls back when user-agent is missing", () => {
+  const reqUrl = new URL(
+    "http://localhost/last?output=raw_base64&output_auto=1&sub_url=https://example.com/sub",
+  );
+  const result = resolveRequestConfig(reqUrl, {});
+  assert.equal(result.ok, true);
+  assert.equal(result.outputAuto, true);
+  assert.equal(result.output, "raw_base64");
 });
 
 test("short-link type override normalizes raw and clash aliases", () => {

@@ -116,6 +116,7 @@ function defaultPayload(): SubscriptionPayload {
     endpoint: "last",
     sub_url: "",
     output: "yml",
+    output_auto: "",
     app: "flclashx",
     device: "windows",
     profile: "",
@@ -144,11 +145,16 @@ function isEncryptedHappLink(value: string): boolean {
 }
 
 function labelsFromPayload(p: SubscriptionPayload): string[] {
-  const labels: string[] = [p.output || "yml"];
+  const labels: string[] = [p.output_auto ? `auto:${p.output || "yml"}` : (p.output || "yml")];
   if (p.app) labels.push(p.app);
   if (p.device) labels.push(p.device);
   if (p.profile) labels.push(`profile:${p.profile}`);
   return labels;
+}
+
+function formatLabelFromPayload(p: SubscriptionPayload): string {
+  const fallback = String(p.output || "yml").trim() || "yml";
+  return p.output_auto ? `auto -> ${fallback}` : fallback;
 }
 
 function parseUrlToPayload(raw: string): { ok: boolean; payload?: SubscriptionPayload; shortId?: string; error?: string } {
@@ -162,6 +168,7 @@ function parseUrlToPayload(raw: string): { ok: boolean; payload?: SubscriptionPa
         endpoint: path === "sub" ? "sub" : "last",
         sub_url: u.searchParams.get("sub_url") || "",
         output: (u.searchParams.get("output") || "yml") as SubscriptionPayload["output"],
+        output_auto: u.searchParams.get("output_auto") || "",
         app: u.searchParams.get("app") || "",
         device: u.searchParams.get("device") || "",
         profile: u.searchParams.get("profile") || "",
@@ -177,7 +184,7 @@ function parseUrlToPayload(raw: string): { ok: boolean; payload?: SubscriptionPa
 function buildFullUrlWithOrigin(payload: SubscriptionPayload, origin: string): string {
   const endpoint = payload.endpoint === "sub" ? "sub" : "last";
   const params = new URLSearchParams();
-  const keys: Array<keyof SubscriptionPayload> = ["sub_url", "output", "app", "device", "profile", "profiles", "hwid"];
+  const keys: Array<keyof SubscriptionPayload> = ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"];
   for (const key of keys) {
     const v = payload[key];
     if (v) params.set(key, String(v));
@@ -258,6 +265,7 @@ function normalizeFavoriteBackupItem(raw: unknown, index: number): FavoriteItem 
       ...defaultPayload(),
       endpoint,
       output,
+      output_auto: String(payloadRaw.output_auto || ""),
       sub_url: subUrl,
       app: String(payloadRaw.app || ""),
       device: String(payloadRaw.device || ""),
@@ -1788,7 +1796,7 @@ export default function App() {
             <option value="__current__">Текущая форма (конструктор)</option>
             {favorites.map((item, idx) => (
               <option key={`${item.shortId || item.title}-${idx}`} value={String(idx)}>
-                {item.title} [{item.payload.output || "yml"} | {item.payload.app || "-"} | {item.payload.device || "-"}]
+                {item.title} [{formatLabelFromPayload(item.payload)} | {item.payload.app || "-"} | {item.payload.device || "-"}]
               </option>
             ))}
           </select>
@@ -2429,7 +2437,7 @@ export default function App() {
                 />
                 <span className="merge-item-main">
                   <strong>{item.title}</strong>
-                  <span className="merge-item-sub">{item.payload.output || "yml"} · {item.payload.app || "-"} · {item.payload.device || "-"}</span>
+                  <span className="merge-item-sub">{formatLabelFromPayload(item.payload)} · {item.payload.app || "-"} · {item.payload.device || "-"}</span>
                 </span>
               </label>
             ))}
@@ -2516,6 +2524,15 @@ export default function App() {
           </div>
 
           <label className="composer-label">Формат</label>
+          <div className="chip-row">
+            <TipChipButton
+              tip="Автоматически выбирать output по входному User-Agent. Если UA нет или он не распознан, используется выбранный ниже формат."
+              className={`chip-btn chip-toggle ${payload.output_auto ? "active" : ""}`}
+              onClick={() => setPayload({ ...payload, output_auto: payload.output_auto ? "" : "1" })}
+            >
+              auto по UA
+            </TipChipButton>
+          </div>
           <div className="chip-row">
             <TipChipButton tip="Формат YAML" className={`chip-btn ${payload.output === "yml" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "yml" })}>yml</TipChipButton>
             <TipChipButton tip="Формат RAW" className={`chip-btn ${payload.output === "raw" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "raw" })}>raw</TipChipButton>
@@ -2782,7 +2799,7 @@ export default function App() {
               orderByOs={orderByOs}
               topMeta={shareModalMeta}
               topMetaLoading={shareModalMetaLoading}
-              subscriptionFormat={shareItem.payload.output || ""}
+              subscriptionFormat={shareItem.payload.output_auto ? `auto -> ${shareItem.payload.output || ""}` : (shareItem.payload.output || "")}
               preferredOs={shareItem.payload.device || ""}
               preferredApp={shareItem.payload.app || ""}
               buildAppShareLink={buildAppShareLink}
